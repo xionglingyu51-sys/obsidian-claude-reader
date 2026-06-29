@@ -97,6 +97,13 @@ export class ChatView extends ItemView {
     this.inputEl?.focus();
   }
 
+  async setContextAndSend(ctx: AskContext, prompt: string) {
+    this.pendingContext = ctx;
+    this.renderContext();
+    this.inputEl.value = prompt;
+    await this.send();
+  }
+
   renderContext() {
     this.contextEl.empty();
     if (!this.pendingContext) return;

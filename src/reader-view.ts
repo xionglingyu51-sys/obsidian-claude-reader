@@ -368,6 +368,19 @@ export class ReaderView extends ItemView {
       this.removeToolbar();
     };
 
+    // 快捷 prompt 模板按钮
+    for (const tpl of this.plugin.settings.templates) {
+      const btn = tb.createEl("button", { cls: "cr-tb-btn cr-tb-tpl" });
+      btn.setText(tpl.label);
+      btn.setAttr("aria-label", tpl.prompt);
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        this.askClaudeWithTemplate(selectedText, tpl.prompt);
+        window.getSelection()?.removeAllRanges();
+        this.removeToolbar();
+      };
+    }
+
     // copy
     const copy = tb.createEl("button", { cls: "cr-tb-btn" });
     setIcon(copy, "copy");
@@ -500,6 +513,18 @@ export class ReaderView extends ItemView {
         this.book?.chapters[this.chapterIndex]?.title || "",
       selection: text.trim(),
     });
+  }
+
+  askClaudeWithTemplate(text: string, prompt: string) {
+    this.plugin.askWithTemplate(
+      {
+        bookTitle: this.book?.title || "",
+        chapterTitle:
+          this.book?.chapters[this.chapterIndex]?.title || "",
+        selection: text.trim(),
+      },
+      prompt
+    );
   }
 
   // ---------- Theme ----------
