@@ -5,6 +5,7 @@ import { Annotation, BookData, COLORS, HighlightColor, NOTE_TYPES, NoteType } fr
 export const VIEW_TYPE_NOTES = "claude-reader-notes-view";
 
 type FilterKind = "all" | "highlight" | "note";
+type GroupMode = "flat" | "byBook";
 
 export class NotesPanelView extends ItemView {
   plugin: ClaudeReaderPlugin;
@@ -17,6 +18,8 @@ export class NotesPanelView extends ItemView {
   filterKind: FilterKind = "all";
   filterColor: HighlightColor | "all" = "all";
   filterType: NoteType | "all" = "all";
+  groupMode: GroupMode = "byBook"; // 默认按书分组
+  collapsedBooks = new Set<string>();
 
   // 缓存所有书的笔记
   cached: { data: BookData; bookFile?: TFile }[] = [];
@@ -43,7 +46,28 @@ export class NotesPanelView extends ItemView {
     const header = this.rootEl.createDiv({ cls: "cr-notes-header" });
     header.createEl("span", { text: "笔记", cls: "cr-notes-title" });
     this.countEl = header.createEl("span", { cls: "cr-notes-count" });
-    // 导出当前书按钮 (按选中卡片背后的书)
+
+    // 分组切换按钮
+    const groupBtn = header.createEl("button", { cls: "cr-icon-btn" });
+    setIcon(groupBtn, this.groupMode === "byBook" ? "list" : "library");
+    groupBtn.setAttr(
+      "aria-label",
+      this.groupMode === "byBook" ? "切换为平铺视图" : "切换为按书分组"
+    );
+    groupBtn.onclick = () => {
+      this.groupMode = this.groupMode === "byBook" ? "flat" : "byBook";
+      setIcon(
+        groupBtn,
+        this.groupMode === "byBook" ? "list" : "library"
+      );
+      groupBtn.setAttr(
+        "aria-label",
+        this.groupMode === "byBook" ? "切换为平铺视图" : "切换为按书分组"
+      );
+      this.renderList();
+    };
+
+    // 导出全部按钮
     const exportAll = header.createEl("button", {
       cls: "cr-icon-btn",
     });
@@ -160,7 +184,7 @@ export class NotesPanelView extends ItemView {
     const q = this.query.trim().toLowerCase();
 
     // flatten + filter
-    type Row = { ann: Annotation; bookTitle: string; bookFile?: TFile };
+    type Row = { ann: Annotation; bookTitle: string; bookFile?: TFile; bookKey: string };
     const rows: Row[] = [];
     for (const { data, bookFile } of this.cached) {
       for (const a of data.highlights) {
@@ -173,10 +197,14 @@ export class NotesPanelView extends ItemView {
             (a.kind === "note" ? a.note.toLowerCase() : "");
           if (!hay.includes(q)) continue;
         }
-        rows.push({ ann: a, bookTitle: data.title, bookFile });
+        rows.push({
+          ann: a,
+          bookTitle: data.title,
+          bookFile,
+          bookKey: data.bookKey,
+        });
       }
     }
-    rows.sort((a, b) => b.ann.updatedAt - a.ann.updatedAt);
 
     this.countEl.setText(`${rows.length} 条`);
 
@@ -188,24 +216,112 @@ export class NotesPanelView extends ItemView {
       return;
     }
 
+    if (this.groupMode === "flat") {
+      rows.sort((a, b) => b.ann.updatedAt - a.ann.updatedAt);
+      for (const r of rows) {
+        this.renderCard(r.ann, r.bookTitle, r.bookFile);
+      }
+      return;
+    }
+
+    // byBook: 按 bookKey 分组
+    const byBook = new Map<
+      string,
+      { title: string; file?: TFile; items: Row[] }
+    >();
     for (const r of rows) {
-      this.renderCard(r.ann, r.bookTitle, r.bookFile);
+      let g = byBook.get(r.bookKey);
+      if (!g) {
+        g = { title: r.bookTitle, file: r.bookFile, items: [] };
+        byBook.set(r.bookKey, g);
+      }
+      g.items.push(r);
+    }
+    // 每书按更新时间倒序;书之间按"最新条目"倒序
+    const groups = Array.from(byBook.entries()).map(([key, g]) => ({
+      key,
+      ...g,
+    }));
+    for (const g of groups) {
+      g.items.sort((a, b) => b.ann.updatedAt - a.ann.updatedAt);
+    }
+    groups.sort(
+      (a, b) =>
+        (b.items[0]?.ann.updatedAt ?? 0) - (a.items[0]?.ann.updatedAt ?? 0)
+    );
+
+    for (const g of groups) {
+      this.renderBookGroup(g.key, g.title, g.file, g.items);
     }
   }
 
-  renderCard(a: Annotation, bookTitle: string, bookFile?: TFile) {
-    const card = this.listEl.createDiv({ cls: "cr-notes-card" });
+  renderBookGroup(
+    bookKey: string,
+    title: string,
+    bookFile: TFile | undefined,
+    items: { ann: Annotation; bookTitle: string; bookFile?: TFile }[]
+  ) {
+    const collapsed = this.collapsedBooks.has(bookKey);
+    const group = this.listEl.createDiv({
+      cls: "cr-notes-book-group" + (collapsed ? " collapsed" : ""),
+    });
+    const head = group.createDiv({ cls: "cr-notes-book-head" });
+    const caret = head.createDiv({ cls: "cr-notes-book-caret" });
+    setIcon(caret, collapsed ? "chevron-right" : "chevron-down");
+
+    head.createDiv({ cls: "cr-notes-book-title", text: title });
+    head.createDiv({
+      cls: "cr-notes-book-count",
+      text: `${items.length}`,
+    });
+
+    head.onclick = () => {
+      if (collapsed) this.collapsedBooks.delete(bookKey);
+      else this.collapsedBooks.add(bookKey);
+      this.renderList();
+    };
+
+    // 单本导出按钮
+    if (bookFile && !collapsed) {
+      const exportBtn = head.createEl("button", { cls: "cr-notes-book-export" });
+      setIcon(exportBtn, "file-down");
+      exportBtn.setAttr("aria-label", "导出这本书的笔记");
+      exportBtn.onclick = async (e) => {
+        e.stopPropagation();
+        const cached = this.cached.find((c) => c.data.bookKey === bookKey);
+        if (cached) await this.plugin.exportBook(cached.data, bookFile);
+      };
+    }
+
+    if (collapsed) return;
+
+    const body = group.createDiv({ cls: "cr-notes-book-body" });
+    for (const r of items) {
+      this.renderCard(r.ann, r.bookTitle, r.bookFile, body, true);
+    }
+  }
+
+  renderCard(
+    a: Annotation,
+    bookTitle: string,
+    bookFile?: TFile,
+    container?: HTMLElement,
+    hideBookTitle = false
+  ) {
+    const parent = container ?? this.listEl;
+    const card = parent.createDiv({ cls: "cr-notes-card" });
     // color bar
     const bar = card.createDiv({ cls: `cr-notes-card-bar cr-notes-bar-${a.color}` });
     bar.style.background = COLORS[a.color].fill;
 
     const main = card.createDiv({ cls: "cr-notes-card-main" });
-    // book + chapter
-    const meta = main.createDiv({ cls: "cr-notes-card-meta" });
-    meta.createSpan({
-      text: bookTitle,
-      cls: "cr-notes-card-book",
-    });
+    if (!hideBookTitle) {
+      const meta = main.createDiv({ cls: "cr-notes-card-meta" });
+      meta.createSpan({
+        text: bookTitle,
+        cls: "cr-notes-card-book",
+      });
+    }
 
     // text
     const text = main.createDiv({
