@@ -176,6 +176,17 @@
 .cr-hl-pink   { background: rgba(196, 165, 168, 0.45); }
 .cr-hl-blue   { background: rgba(158, 178, 196, 0.45); }
 
+.cr-hl-has-note {
+  position: relative;
+}
+.cr-hl-has-note::after {
+  content: "📝";
+  font-size: 0.6em;
+  margin-left: 2px;
+  vertical-align: super;
+  opacity: 0.75;
+}
+
 .theme-dark .cr-hl-yellow { background: rgba(212, 192, 142, 0.32); }
 .theme-dark .cr-hl-green  { background: rgba(166, 184, 161, 0.30); }
 .theme-dark .cr-hl-pink   { background: rgba(196, 165, 168, 0.30); }
@@ -567,4 +578,72 @@
     z-index: 5;
     box-shadow: 2px 0 8px rgba(0,0,0,0.15);
   }
+}
+
+/* ---------- Note modal ---------- */
+.cr-note-modal {
+  padding: 4px 0;
+}
+.cr-note-modal-title {
+  margin: 0 0 12px;
+  font-size: 14px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 500;
+}
+.cr-note-modal-quote {
+  border-left: 3px solid #D97757;
+  padding: 6px 0 6px 10px;
+  margin-bottom: 14px;
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  max-height: 120px;
+  overflow-y: auto;
+  font-style: italic;
+}
+.cr-note-modal-input {
+  width: 100%;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 14px;
+  line-height: 1.55;
+  resize: vertical;
+  font-family: inherit;
+  color: var(--text-normal);
+  outline: none;
+  min-height: 120px;
+}
+.cr-note-modal-input:focus {
+  border-color: #D97757;
+}
+.cr-note-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+.cr-note-modal-btn {
+  padding: 6px 16px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  cursor: pointer;
+  font-size: 13px;
+}
+.cr-note-modal-btn:hover {
+  background: var(--background-modifier-hover);
+}
+.cr-note-modal-save {
+  background: #D97757;
+  border-color: #D97757;
+  color: #fff;
+}
+.cr-note-modal-save:hover {
+  background: #C96442;
+  border-color: #C96442;
 }

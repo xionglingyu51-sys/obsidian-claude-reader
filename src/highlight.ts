@@ -85,7 +85,9 @@ function wrapRangeWithSpans(
 
     const span = document.createElement("span");
     span.className = `cr-hl cr-hl-${h.color}`;
+    if (h.note) span.classList.add("cr-hl-has-note");
     span.dataset.hlId = h.id;
+    if (h.note) span.title = h.note;
     span.textContent = middle;
     span.addEventListener("click", (e) => {
       e.stopPropagation();

@@ -1,4 +1,4 @@
-import { ItemView, Notice, TFile, WorkspaceLeaf, setIcon } from "obsidian";
+import { ItemView, Modal, Notice, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 import type ClaudeReaderPlugin from "./main";
 import { EpubBook, parseEpub } from "./epub";
 import {
@@ -417,6 +417,21 @@ export class ReaderView extends ItemView {
       });
     }
 
+    // 笔记按钮 — 划线 + 写笔记 一气呵成
+    const noteBtn = tb.createEl("button", { cls: "cr-tb-btn" });
+    noteBtn.setText("📝");
+    noteBtn.setAttr("aria-label", "划线并写笔记");
+    onPress(noteBtn, async () => {
+      const h = await this.addHighlight(
+        savedRange.cloneRange(),
+        "yellow",
+        true
+      );
+      window.getSelection()?.removeAllRanges();
+      this.removeToolbar();
+      if (h) this.openNoteModal(h);
+    });
+
     // AI button
     const ai = tb.createEl("button", { cls: "cr-tb-btn cr-tb-ai" });
     ai.setText("AI");
@@ -501,14 +516,17 @@ export class ReaderView extends ItemView {
     }
   }
 
-  async addHighlight(range: Range, color: HighlightColor) {
-    if (!this.data || !this.book) return;
+  async addHighlight(
+    range: Range,
+    color: HighlightColor,
+    silent = false
+  ): Promise<Highlight | null> {
+    if (!this.data || !this.book) return null;
     const ch = this.book.chapters[this.chapterIndex];
-    // normalize root: 合并相邻文本节点,确保 path 稳定
     this.chapterRootEl.normalize();
 
     const info = highlightFromRange(range, this.chapterRootEl);
-    if (!info) return;
+    if (!info) return null;
 
     const h: Highlight = {
       id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
@@ -526,6 +544,7 @@ export class ReaderView extends ItemView {
       this.data.title
     );
     this.data.highlights.push(h);
+    return h;
   }
 
   onHighlightClick(h: Highlight, target: HTMLElement) {
@@ -573,6 +592,16 @@ export class ReaderView extends ItemView {
         this.removeToolbar();
       });
     }
+
+    // 笔记按钮
+    const noteBtn = tb.createEl("button", { cls: "cr-tb-btn" });
+    noteBtn.setText(h.note ? "✏️" : "📝");
+    noteBtn.setAttr("aria-label", h.note ? "编辑笔记" : "添加笔记");
+    onPress(noteBtn, () => {
+      this.removeToolbar();
+      this.openNoteModal(h);
+    });
+
     const ai = tb.createEl("button", { cls: "cr-tb-btn cr-tb-ai" });
     ai.setText("AI");
     onPress(ai, () => {
@@ -636,6 +665,22 @@ export class ReaderView extends ItemView {
       },
       prompt
     );
+  }
+
+  openNoteModal(h: Highlight) {
+    new NoteModal(this.app, h, async (newNote) => {
+      if (!this.data) return;
+      h.note = newNote.trim() || undefined;
+      await this.plugin.storage.upsertHighlight(
+        this.data.bookKey,
+        h,
+        this.data.title
+      );
+      // 更新内存里的引用
+      const idx = this.data.highlights.findIndex((x) => x.id === h.id);
+      if (idx >= 0) this.data.highlights[idx] = h;
+      await this.gotoChapter(this.chapterIndex, this.scrollPercent());
+    }).open();
   }
 
   // ---------- Theme ----------
@@ -761,5 +806,70 @@ export class ReaderView extends ItemView {
       top: el.scrollTop + direction * step,
       behavior: "smooth",
     });
+  }
+}
+
+class NoteModal extends Modal {
+  highlight: Highlight;
+  onSave: (note: string) => void;
+
+  constructor(
+    app: App,
+    highlight: Highlight,
+    onSave: (note: string) => void
+  ) {
+    super(app);
+    this.highlight = highlight;
+    this.onSave = onSave;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("cr-note-modal");
+
+    contentEl.createEl("h3", { text: "笔记", cls: "cr-note-modal-title" });
+
+    const quote = contentEl.createDiv({ cls: "cr-note-modal-quote" });
+    quote.setText(this.highlight.text);
+
+    const textarea = contentEl.createEl("textarea", {
+      cls: "cr-note-modal-input",
+      attr: {
+        placeholder: "写点什么...",
+        rows: "6",
+      },
+    });
+    textarea.value = this.highlight.note || "";
+
+    const actions = contentEl.createDiv({ cls: "cr-note-modal-actions" });
+    const cancel = actions.createEl("button", {
+      text: "取消",
+      cls: "cr-note-modal-btn",
+    });
+    cancel.onclick = () => this.close();
+    const save = actions.createEl("button", {
+      text: "保存",
+      cls: "cr-note-modal-btn cr-note-modal-save",
+    });
+    save.onclick = () => {
+      this.onSave(textarea.value);
+      this.close();
+    };
+
+    // Cmd/Ctrl+Enter 保存
+    textarea.addEventListener("keydown", (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+        e.preventDefault();
+        this.onSave(textarea.value);
+        this.close();
+      }
+    });
+
+    window.setTimeout(() => textarea.focus(), 50);
+  }
+
+  onClose() {
+    this.contentEl.empty();
   }
 }
