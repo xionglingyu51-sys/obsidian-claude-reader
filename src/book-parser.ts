@@ -296,33 +296,108 @@ function cleanMobiHtml(html: string): string {
 }
 
 function decodeMobiString(bytes: Uint8Array, encoding: number): string {
-  // 65001 = UTF-8, 1252 = Windows-1252。但实际很多中文 MOBI header 写 1252
-  // 但正文是 UTF-8。策略: 先按 header 解,如果出现大量替换字符 (U+FFFD) 或控制字符,
-  // 反向再试一次 UTF-8 / GB18030。
-  const tryDecode = (enc: string): string | null => {
-    try {
-      return new TextDecoder(enc, { fatal: true }).decode(bytes);
-    } catch {
-      return null;
-    }
-  };
-  // 1. 按 header
-  if (encoding === 65001) {
-    const r = tryDecode("utf-8");
-    if (r !== null) return r;
-  }
-  // 2. UTF-8 优先 (header 经常错标 1252)
-  const utf8 = tryDecode("utf-8");
-  if (utf8 !== null) return utf8;
-  // 3. GB18030 (常见中文 MOBI)
-  const gb = tryDecode("gb18030");
-  if (gb !== null) return gb;
-  // 4. Windows-1252 (确实是英文 MOBI 的常见编码)
-  try {
-    return new TextDecoder("windows-1252").decode(bytes);
-  } catch {
+  // 中文 MOBI 大部分是 UTF-8 (encoding=65001), 英文 MOBI 是 Windows-1252 (encoding=1252)。
+  // 不能用 fatal:true 因为正文里偶有控制字节会让整本切换错编码 — 改为容错解码,
+  // 非法字节变 U+FFFD,绝大多数文字仍然正确。
+  //
+  // 优先级:
+  //   1. header 说 65001 → UTF-8
+  //   2. header 说 1252  → 但中文盗版 MOBI 经常错标, 用启发式判断: 字节里有大量 >=0xE0 三字节
+  //      序列就当 UTF-8, 否则 Windows-1252
+  //   3. 其他 → UTF-8 (最常见)
+  const looksLikeUtf8 = sniffUtf8(bytes);
+
+  if (encoding === 65001 || looksLikeUtf8) {
     return new TextDecoder("utf-8").decode(bytes);
   }
+  if (encoding === 1252) {
+    // 但要先排除 GB18030 (有些中文 MOBI 用 GBK 系列编码)
+    if (sniffGb18030(bytes)) {
+      try {
+        return new TextDecoder("gb18030").decode(bytes);
+      } catch {
+        // ignore
+      }
+    }
+    try {
+      return new TextDecoder("windows-1252").decode(bytes);
+    } catch {
+      return new TextDecoder("utf-8").decode(bytes);
+    }
+  }
+  return new TextDecoder("utf-8").decode(bytes);
+}
+
+/**
+ * 简单启发: 扫一段 sample, 数有多少看起来是 UTF-8 多字节序列的开头字节,
+ * 并且后续字节确实符合 UTF-8 continuation 模式 (0x80-0xBF)。
+ * 中文 UTF-8 文本会有大量 0xE4-0xE9 开头的三字节序列。
+ */
+function sniffUtf8(bytes: Uint8Array): boolean {
+  const sampleLen = Math.min(bytes.length, 8192);
+  let utf8MultibyteHits = 0;
+  let badBytes = 0;
+  for (let i = 0; i < sampleLen; ) {
+    const b = bytes[i];
+    if (b < 0x80) {
+      i++;
+      continue;
+    }
+    if (b >= 0xc2 && b <= 0xdf && i + 1 < sampleLen) {
+      // 2-byte
+      if ((bytes[i + 1] & 0xc0) === 0x80) {
+        utf8MultibyteHits++;
+        i += 2;
+        continue;
+      }
+    }
+    if (b >= 0xe0 && b <= 0xef && i + 2 < sampleLen) {
+      // 3-byte (中文常见)
+      if (
+        (bytes[i + 1] & 0xc0) === 0x80 &&
+        (bytes[i + 2] & 0xc0) === 0x80
+      ) {
+        utf8MultibyteHits++;
+        i += 3;
+        continue;
+      }
+    }
+    if (b >= 0xf0 && b <= 0xf4 && i + 3 < sampleLen) {
+      // 4-byte
+      if (
+        (bytes[i + 1] & 0xc0) === 0x80 &&
+        (bytes[i + 2] & 0xc0) === 0x80 &&
+        (bytes[i + 3] & 0xc0) === 0x80
+      ) {
+        utf8MultibyteHits++;
+        i += 4;
+        continue;
+      }
+    }
+    badBytes++;
+    i++;
+  }
+  // 如果命中超过 10 次 UTF-8 序列且坏字节远少于命中,认为是 UTF-8
+  return utf8MultibyteHits >= 10 && utf8MultibyteHits >= badBytes * 3;
+}
+
+function sniffGb18030(bytes: Uint8Array): boolean {
+  // GB18030 双字节区间: 第一字节 0x81-0xFE, 第二字节 0x40-0xFE (除 0x7F)
+  // 这和 Windows-1252 的可打印字符范围有重叠, 但中文文本里 >= 0x80 的字节非常密集
+  // 而英文 Windows-1252 文本里 >= 0x80 的字节很少 (主要是少数标点)
+  const sampleLen = Math.min(bytes.length, 8192);
+  let highByteRuns = 0;
+  for (let i = 0; i < sampleLen - 1; i++) {
+    const b = bytes[i];
+    if (b >= 0x81 && b <= 0xfe) {
+      const next = bytes[i + 1];
+      if (next >= 0x40 && next <= 0xfe && next !== 0x7f) {
+        highByteRuns++;
+        i++; // skip pair
+      }
+    }
+  }
+  return highByteRuns >= 50;
 }
 
 /**
