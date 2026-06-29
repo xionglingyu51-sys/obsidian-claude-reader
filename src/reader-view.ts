@@ -651,76 +651,52 @@ export class ReaderView extends ItemView {
 
   // ---------- Swipe nav ----------
   registerSwipeNav() {
-    let startX = 0;
-    let startY = 0;
-    let startT = 0;
-    let active = false;
-    let lockedHorizontal = false;
+    // 点按翻页: 左侧 35% → 上翻一页, 右侧 35% → 下翻一页
+    // 严格判定为「干净的 tap」: 不滚动、不长按、没产生选区、不点在交互元素上
+    let downX = 0;
+    let downY = 0;
+    let downT = 0;
+    let downScrollTop = 0;
 
     this.contentEl_.addEventListener(
-      "touchstart",
-      (e: TouchEvent) => {
-        if (e.touches.length !== 1) return;
+      "pointerdown",
+      (e: PointerEvent) => {
+        downX = e.clientX;
+        downY = e.clientY;
+        downT = Date.now();
+        downScrollTop = this.contentEl_.scrollTop;
+      }
+    );
+
+    this.contentEl_.addEventListener(
+      "pointerup",
+      (e: PointerEvent) => {
+        const dx = e.clientX - downX;
+        const dy = e.clientY - downY;
+        const dt = Date.now() - downT;
+        // 判定 tap
+        if (Math.abs(dx) > 8 || Math.abs(dy) > 8) return;
+        if (dt > 350) return; // 长按不算
+        if (Math.abs(this.contentEl_.scrollTop - downScrollTop) > 4) return;
+
+        // 有选区不翻
         const sel = window.getSelection();
-        const hadSelection = !!(
-          sel &&
-          !sel.isCollapsed &&
-          sel.toString().length > 0
-        );
-        if (hadSelection) return;
-        startX = e.touches[0].clientX;
-        startY = e.touches[0].clientY;
-        startT = Date.now();
-        active = true;
-        lockedHorizontal = false;
-      },
-      { passive: true }
-    );
+        if (sel && !sel.isCollapsed && sel.toString().length > 0) return;
 
-    this.contentEl_.addEventListener(
-      "touchmove",
-      (e: TouchEvent) => {
-        if (!active) return;
-        const t = e.touches[0];
-        const dx = t.clientX - startX;
-        const dy = t.clientY - startY;
-        if (!lockedHorizontal) {
-          // 一旦横向位移明显超过纵向,锁定为横向手势,阻止系统侧边栏滑动
-          if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) * 1.5) {
-            lockedHorizontal = true;
-          } else if (Math.abs(dy) > 10) {
-            // 纵向占主,放弃 swipe (让原生滚动)
-            active = false;
-            return;
-          }
-        }
-        if (lockedHorizontal && e.cancelable) {
-          e.preventDefault();
-        }
-      },
-      { passive: false }
-    );
+        // 不在交互元素上 (高亮/链接/图片/按钮/工具条)
+        const target = e.target as HTMLElement;
+        if (target.closest(".cr-hl, a, img, button, .cr-toolbar")) return;
 
-    this.contentEl_.addEventListener(
-      "touchend",
-      (e: TouchEvent) => {
-        if (!active) return;
-        active = false;
-        if (!lockedHorizontal) return;
-        const t = e.changedTouches[0];
-        const dx = t.clientX - startX;
-        const dy = t.clientY - startY;
-        const dt = Date.now() - startT;
-        if (Math.abs(dx) < 60) return;
-        if (Math.abs(dy) > 80) return;
-        if (dt > 600) return;
-        if (dx < 0) {
-          this.gotoChapter(this.chapterIndex + 1);
-        } else {
-          this.gotoChapter(this.chapterIndex - 1);
+        const rect = this.contentEl_.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const w = rect.width;
+        if (x < w * 0.35) {
+          this.flipPage(-1);
+        } else if (x > w * 0.65) {
+          this.flipPage(1);
         }
-      },
-      { passive: true }
+        // 中间 30% 不翻 — 留给单纯点击/关闭工具条
+      }
     );
 
     // 桌面: 在章节顶/底时滚轮再滚就翻章
@@ -737,18 +713,53 @@ export class ReaderView extends ItemView {
         window.setTimeout(() => (wheelLock = false), 500);
       } else if (e.deltaY < -30 && atTop) {
         wheelLock = true;
-        this.gotoChapter(this.chapterIndex - 1);
+        this.gotoChapter(this.chapterIndex - 1, 1);
         window.setTimeout(() => (wheelLock = false), 500);
       }
     });
 
-    // 键盘 (桌面 Obsidian)
+    // 键盘
     this.registerDomEvent(window, "keydown", (e: KeyboardEvent) => {
       if (!this.rootEl.isShown()) return;
       if (e.target instanceof HTMLInputElement) return;
       if (e.target instanceof HTMLTextAreaElement) return;
-      if (e.key === "ArrowLeft") this.gotoChapter(this.chapterIndex - 1);
-      if (e.key === "ArrowRight") this.gotoChapter(this.chapterIndex + 1);
+      if (e.key === "ArrowLeft" || e.key === "PageUp") {
+        e.preventDefault();
+        this.flipPage(-1);
+      } else if (
+        e.key === "ArrowRight" ||
+        e.key === "PageDown" ||
+        e.key === " "
+      ) {
+        e.preventDefault();
+        this.flipPage(1);
+      }
+    });
+  }
+
+  /** 翻一屏。到底自动进下一章;到顶上一章并滚到底 */
+  flipPage(direction: 1 | -1) {
+    const el = this.contentEl_;
+    const step = el.clientHeight * 0.9;
+    const atBottom =
+      el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+    const atTop = el.scrollTop <= 4;
+
+    if (direction > 0 && atBottom) {
+      if (this.book && this.chapterIndex < this.book.chapters.length - 1) {
+        this.gotoChapter(this.chapterIndex + 1);
+      }
+      return;
+    }
+    if (direction < 0 && atTop) {
+      if (this.chapterIndex > 0) {
+        this.gotoChapter(this.chapterIndex - 1, 1);
+      }
+      return;
+    }
+    el.scrollTo({
+      top: el.scrollTop + direction * step,
+      behavior: "smooth",
     });
   }
 }
