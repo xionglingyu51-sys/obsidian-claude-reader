@@ -183,7 +183,6 @@ function parseMobiBook(u8: Uint8Array): MobiResult {
   // textLength @ rec0Start+4
   // recordCount @ rec0Start+8 (number of text records)
   const textRecordCount = dv.getUint16(rec0Start + 8, false);
-  const recordSize = dv.getUint16(rec0Start + 10, false);
   // MOBI header signature @ rec0Start+16 = "MOBI"
   const mobiSig = String.fromCharCode(...u8.slice(rec0Start + 16, rec0Start + 20));
   if (mobiSig !== "MOBI") {
@@ -195,10 +194,21 @@ function parseMobiBook(u8: Uint8Array): MobiResult {
   // fullNameOffset @ rec0Start+84, fullNameLength @ rec0Start+88
   const fullNameOffset = dv.getUint32(rec0Start + 84, false);
   const fullNameLength = dv.getUint32(rec0Start + 88, false);
-  const title = decodeMobiString(
-    u8.slice(rec0Start + fullNameOffset, rec0Start + fullNameOffset + fullNameLength),
-    textEncoding
+
+  // extra data flags @ MOBI header offset 0xF2 (header 必须长到能容下)
+  let extraDataFlags = 0;
+  if (
+    headerLength >= 0xf4 &&
+    rec0Start + 0xf2 + 2 <= u8.length
+  ) {
+    extraDataFlags = dv.getUint16(rec0Start + 0xf2, false);
+  }
+
+  const titleBytes = u8.slice(
+    rec0Start + fullNameOffset,
+    rec0Start + fullNameOffset + fullNameLength
   );
+  const title = decodeMobiString(titleBytes, textEncoding);
 
   if (compression !== 1 && compression !== 2) {
     throw new Error(
@@ -212,9 +222,7 @@ function parseMobiBook(u8: Uint8Array): MobiResult {
     const start = recordOffsets[i];
     const end = i + 1 < numRecords ? recordOffsets[i + 1] : u8.length;
     const data = u8.slice(start, end);
-    // PalmDoc record 末尾可能有 trailing entries — 我们按 MOBI header indicator 处理
-    // 简化: 直接 decompress 整条
-    const trimmed = stripTrailingEntries(data);
+    const trimmed = stripTrailingEntries(data, extraDataFlags);
     if (compression === 1) {
       textParts.push(trimmed);
     } else {
@@ -282,8 +290,28 @@ function cleanMobiHtml(html: string): string {
 }
 
 function decodeMobiString(bytes: Uint8Array, encoding: number): string {
-  if (encoding === 65001) return new TextDecoder("utf-8").decode(bytes);
-  // cp1252 不被所有 Decoder 支持,fallback 用 windows-1252 / latin1
+  // 65001 = UTF-8, 1252 = Windows-1252。但实际很多中文 MOBI header 写 1252
+  // 但正文是 UTF-8。策略: 先按 header 解,如果出现大量替换字符 (U+FFFD) 或控制字符,
+  // 反向再试一次 UTF-8 / GB18030。
+  const tryDecode = (enc: string): string | null => {
+    try {
+      return new TextDecoder(enc, { fatal: true }).decode(bytes);
+    } catch {
+      return null;
+    }
+  };
+  // 1. 按 header
+  if (encoding === 65001) {
+    const r = tryDecode("utf-8");
+    if (r !== null) return r;
+  }
+  // 2. UTF-8 优先 (header 经常错标 1252)
+  const utf8 = tryDecode("utf-8");
+  if (utf8 !== null) return utf8;
+  // 3. GB18030 (常见中文 MOBI)
+  const gb = tryDecode("gb18030");
+  if (gb !== null) return gb;
+  // 4. Windows-1252 (确实是英文 MOBI 的常见编码)
   try {
     return new TextDecoder("windows-1252").decode(bytes);
   } catch {
@@ -291,9 +319,53 @@ function decodeMobiString(bytes: Uint8Array, encoding: number): string {
   }
 }
 
-function stripTrailingEntries(data: Uint8Array): Uint8Array {
-  // 简化版: 直接返回。trailing entries 解析复杂,大部分中文 MOBI 没有
-  return data;
+/**
+ * MOBI 每条 PalmDoc 记录的末尾可能有 trailing entries (元数据,不是正文)。
+ * 根据 MOBI header 0xF2 处的 extra-data-flags 位决定有哪些 entries 要剥掉。
+ * 每个 entry 的长度存在末尾的可变长度编码 (backwards encoded varint, 高位是终止标志)。
+ * Multi-byte indicator (flag bit 0) 特殊: 末尾 1 字节,低 2 位是要剥的字节数。
+ *
+ * 参考: https://wiki.mobileread.com/wiki/MOBI#Trailing_entries
+ */
+function stripTrailingEntries(data: Uint8Array, flags: number): Uint8Array {
+  if (flags === 0) return data;
+  let end = data.length;
+  // 先处理 bit 1..15 (按位检查,每个 bit 表示一种 trailing entry)
+  for (let bit = 15; bit >= 1; bit--) {
+    if ((flags & (1 << bit)) === 0) continue;
+    const size = readBackwardVarint(data, end);
+    end -= size;
+    if (end < 0) return data; // 数据异常,放弃剥
+  }
+  // 处理 bit 0: multi-byte 字符指示符
+  if ((flags & 1) !== 0) {
+    if (end <= 0) return data;
+    const last = data[end - 1];
+    const skip = (last & 0x3) + 1;
+    end -= skip;
+    if (end < 0) return data;
+  }
+  return data.slice(0, end);
+}
+
+/**
+ * 反向读 varint: 从 endExclusive 往前找,直到遇到高位为 1 的字节为止。
+ * 返回这段 varint 表示的 entry 长度 (含 varint 自身)。
+ */
+function readBackwardVarint(data: Uint8Array, endExclusive: number): number {
+  let value = 0;
+  let bytesUsed = 0;
+  for (let i = endExclusive - 1; i >= 0 && bytesUsed < 4; i--) {
+    const b = data[i];
+    bytesUsed++;
+    if ((b & 0x80) !== 0) {
+      // 终止字节: 高位是 1
+      value = (value << 7) | (b & 0x7f);
+      return value;
+    }
+    value = (value << 7) | (b & 0x7f);
+  }
+  return value;
 }
 
 function concatU8(arrs: Uint8Array[]): Uint8Array {
