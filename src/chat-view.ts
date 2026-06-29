@@ -2,11 +2,14 @@ import {
   ItemView,
   MarkdownRenderer,
   Notice,
+  TFile,
   WorkspaceLeaf,
   setIcon,
 } from "obsidian";
 import type ClaudeReaderPlugin from "./main";
 import { streamClaude } from "./api";
+import { FileSuggestModal } from "./file-suggest";
+import { parseBook } from "./book-parser";
 
 export const VIEW_TYPE_CHAT = "claude-reader-chat-view";
 
@@ -16,16 +19,29 @@ export interface AskContext {
   selection: string;
 }
 
+interface AttachedFile {
+  path: string;
+  kind: "note" | "book";
+  /** 截断后的纯文本内容 */
+  content: string;
+  /** 实际原文长度,用于显示 */
+  fullLength: number;
+}
+
+const MAX_FILE_CHARS = 60000;
+
 type Msg = { role: "user" | "assistant"; content: string };
 
 export class ChatView extends ItemView {
   plugin: ClaudeReaderPlugin;
   messages: Msg[] = [];
   pendingContext: AskContext | null = null;
+  attachedFiles: AttachedFile[] = [];
   messagesEl!: HTMLElement;
   inputEl!: HTMLTextAreaElement;
   sendBtn!: HTMLButtonElement;
   contextEl!: HTMLElement;
+  attachBtn!: HTMLButtonElement;
   abortController: AbortController | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: ClaudeReaderPlugin) {
@@ -55,6 +71,7 @@ export class ChatView extends ItemView {
     clearBtn.onclick = () => {
       this.messages = [];
       this.pendingContext = null;
+      this.attachedFiles = [];
       this.renderMessages();
       this.renderContext();
     };
@@ -67,14 +84,28 @@ export class ChatView extends ItemView {
     this.renderContext();
 
     const inputRow = inputArea.createDiv({ cls: "cr-chat-input-row" });
+    // 左侧 + 引用文件按钮
+    this.attachBtn = inputRow.createEl("button", { cls: "cr-chat-attach" });
+    setIcon(this.attachBtn, "paperclip");
+    this.attachBtn.setAttr("aria-label", "引用文件 (笔记/书)");
+    this.attachBtn.onclick = () => this.openFilePicker();
+
     this.inputEl = inputRow.createEl("textarea", {
       cls: "cr-chat-input",
       attr: {
         rows: "1",
-        placeholder: "问点什么...",
+        placeholder: "问点什么... (@ 引用文件)",
       },
     });
-    this.inputEl.addEventListener("input", () => this.autoSize());
+    this.inputEl.addEventListener("input", () => {
+      this.autoSize();
+      const v = this.inputEl.value;
+      if (v.endsWith("@")) {
+        // 触发 @ 文件选择
+        this.inputEl.value = v.slice(0, -1);
+        this.openFilePicker();
+      }
+    });
     this.inputEl.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
@@ -106,26 +137,96 @@ export class ChatView extends ItemView {
 
   renderContext() {
     this.contextEl.empty();
-    if (!this.pendingContext) return;
-    const c = this.contextEl.createDiv({ cls: "cr-chat-context-card" });
-    const meta = c.createDiv({ cls: "cr-chat-context-meta" });
-    meta.createSpan({ text: `📖 ${this.pendingContext.bookTitle}` });
-    if (this.pendingContext.chapterTitle) {
-      meta.createSpan({
-        text: ` · ${this.pendingContext.chapterTitle}`,
-        cls: "cr-chat-context-sub",
+
+    // 引文 card (划词来的)
+    if (this.pendingContext) {
+      const c = this.contextEl.createDiv({ cls: "cr-chat-context-card" });
+      const meta = c.createDiv({ cls: "cr-chat-context-meta" });
+      meta.createSpan({ text: `📖 ${this.pendingContext.bookTitle}` });
+      if (this.pendingContext.chapterTitle) {
+        meta.createSpan({
+          text: ` · ${this.pendingContext.chapterTitle}`,
+          cls: "cr-chat-context-sub",
+        });
+      }
+      c.createDiv({
+        cls: "cr-chat-context-quote",
+        text: this.pendingContext.selection,
       });
+      const x = c.createEl("button", { cls: "cr-icon-btn cr-chat-context-x" });
+      setIcon(x, "x");
+      x.onclick = () => {
+        this.pendingContext = null;
+        this.renderContext();
+      };
     }
-    c.createDiv({
-      cls: "cr-chat-context-quote",
-      text: this.pendingContext.selection,
-    });
-    const x = c.createEl("button", { cls: "cr-icon-btn cr-chat-context-x" });
-    setIcon(x, "x");
-    x.onclick = () => {
-      this.pendingContext = null;
+
+    // 引用文件 chips
+    if (this.attachedFiles.length > 0) {
+      const chips = this.contextEl.createDiv({ cls: "cr-chat-chips" });
+      for (const f of this.attachedFiles) {
+        const chip = chips.createDiv({ cls: "cr-chat-chip" });
+        setIcon(
+          chip.createSpan({ cls: "cr-chat-chip-icon" }),
+          f.kind === "book" ? "book" : "file-text"
+        );
+        const name = f.path.split("/").pop() || f.path;
+        chip.createSpan({ text: name });
+        if (f.content.length < f.fullLength) {
+          chip.createSpan({
+            cls: "cr-chat-chip-trunc",
+            text: ` (${Math.round((f.content.length / f.fullLength) * 100)}%)`,
+          });
+        }
+        const x = chip.createSpan({ cls: "cr-chat-chip-x" });
+        setIcon(x, "x");
+        x.onclick = (e) => {
+          e.stopPropagation();
+          this.attachedFiles = this.attachedFiles.filter(
+            (a) => a.path !== f.path
+          );
+          this.renderContext();
+        };
+      }
+    }
+  }
+
+  openFilePicker() {
+    new FileSuggestModal(this.app, async (file) => {
+      await this.attachFile(file);
+    }).open();
+  }
+
+  async attachFile(file: TFile) {
+    if (this.attachedFiles.some((a) => a.path === file.path)) return;
+    try {
+      const ext = file.extension.toLowerCase();
+      if (ext === "md") {
+        const txt = await this.app.vault.read(file);
+        this.attachedFiles.push({
+          path: file.path,
+          kind: "note",
+          content: txt.slice(0, MAX_FILE_CHARS),
+          fullLength: txt.length,
+        });
+      } else {
+        new Notice(`正在解析 ${file.name}...`);
+        const buf = await this.app.vault.readBinary(file);
+        const book = await parseBook(buf, file.name);
+        const fullText = book.chapters
+          .map((c) => `# ${c.title}\n\n` + c.html.replace(/<[^>]+>/g, ""))
+          .join("\n\n");
+        this.attachedFiles.push({
+          path: file.path,
+          kind: "book",
+          content: fullText.slice(0, MAX_FILE_CHARS),
+          fullLength: fullText.length,
+        });
+      }
       this.renderContext();
-    };
+    } catch (e) {
+      new Notice(`加载失败: ${(e as Error).message}`);
+    }
   }
 
   renderMessages() {
@@ -187,6 +288,21 @@ export class ChatView extends ItemView {
     };
   }
 
+  buildSystemPrompt(): string {
+    let sys = this.plugin.settings.systemPrompt;
+    if (this.attachedFiles.length > 0) {
+      sys += "\n\n---\n\n用户附加了以下文件作为上下文,请基于它们回答:\n";
+      for (const f of this.attachedFiles) {
+        const tag = f.kind === "book" ? "[书]" : "[笔记]";
+        sys += `\n\n# ${tag} ${f.path}\n\n${f.content}`;
+        if (f.content.length < f.fullLength) {
+          sys += "\n\n[...内容已截断]";
+        }
+      }
+    }
+    return sys;
+  }
+
   buildUserMessage(text: string): string {
     if (!this.pendingContext) return text;
     const c = this.pendingContext;
@@ -228,7 +344,7 @@ export class ChatView extends ItemView {
         apiKey: this.plugin.settings.apiKey,
         baseUrl: this.plugin.settings.baseUrl,
         model: this.plugin.settings.model,
-        system: this.plugin.settings.systemPrompt,
+        system: this.buildSystemPrompt(),
         messages: this.messages,
       },
       {
