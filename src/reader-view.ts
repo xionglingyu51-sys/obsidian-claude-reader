@@ -239,6 +239,12 @@ export class ReaderView extends ItemView {
     searchBtn.setAttr("aria-label", "全书搜索");
     searchBtn.onclick = () => this.openSearchModal();
 
+    // 总结当前章节
+    const summarizeBtn = header.createEl("button", { cls: "cr-icon-btn" });
+    setIcon(summarizeBtn, "scroll-text");
+    summarizeBtn.setAttr("aria-label", "AI 总结当前章节");
+    summarizeBtn.onclick = () => this.summarizeCurrentChapter();
+
     // 书签
     const bookmarkBtn = header.createEl("button", { cls: "cr-icon-btn" });
     setIcon(bookmarkBtn, "bookmark");
@@ -375,6 +381,7 @@ export class ReaderView extends ItemView {
   async gotoChapter(i: number, scrollPercent = 0) {
     if (!this.book) return;
     if (i < 0 || i >= this.book.chapters.length) return;
+    this.closeInChapterFind();
     this.chapterIndex = i;
     const ch = this.book.chapters[i];
 
@@ -901,6 +908,23 @@ export class ReaderView extends ItemView {
     );
   }
 
+  async summarizeCurrentChapter() {
+    if (!this.book) return;
+    const ch = this.book.chapters[this.chapterIndex];
+    if (!ch) return;
+    const plain = ch.html.replace(/<[^>]+>/g, "").trim();
+    const MAX = 50000;
+    const text = plain.length > MAX ? plain.slice(0, MAX) + "\n\n[...内容已截断]" : plain;
+    this.plugin.askWithTemplate(
+      {
+        bookTitle: this.book.title,
+        chapterTitle: ch.title,
+        selection: text,
+      },
+      "请总结这一章的主要内容和核心论点,用 markdown 列点。"
+    );
+  }
+
   openSearchModal() {
     if (!this.book) return;
     new SearchModal(this.app, this.book, async (chapterIndex, query) => {
@@ -909,7 +933,162 @@ export class ReaderView extends ItemView {
     }).open();
   }
 
-  // ---------- Bookmarks ----------
+  // ---------- In-chapter find ----------
+  findBarEl: HTMLElement | null = null;
+  findMatches: HTMLElement[] = [];
+  findIndex = 0;
+
+  openInChapterFind() {
+    if (this.findBarEl) {
+      const input = this.findBarEl.querySelector(
+        ".cr-find-input"
+      ) as HTMLInputElement | null;
+      input?.focus();
+      input?.select();
+      return;
+    }
+    const bar = this.rootEl.createDiv({ cls: "cr-find-bar" });
+    const input = bar.createEl("input", {
+      cls: "cr-find-input",
+      attr: { placeholder: "章内查找..." },
+    });
+    const counter = bar.createSpan({ cls: "cr-find-counter", text: "" });
+    const prevBtn = bar.createEl("button", { cls: "cr-icon-btn" });
+    setIcon(prevBtn, "chevron-up");
+    prevBtn.onclick = () => this.findStep(-1);
+    const nextBtn = bar.createEl("button", { cls: "cr-icon-btn" });
+    setIcon(nextBtn, "chevron-down");
+    nextBtn.onclick = () => this.findStep(1);
+    const closeBtn = bar.createEl("button", { cls: "cr-icon-btn" });
+    setIcon(closeBtn, "x");
+    closeBtn.onclick = () => this.closeInChapterFind();
+
+    input.addEventListener("input", () => {
+      this.runChapterFind(input.value, counter);
+    });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        this.findStep(e.shiftKey ? -1 : 1);
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        this.closeInChapterFind();
+      }
+    });
+
+    this.findBarEl = bar;
+    window.setTimeout(() => input.focus(), 30);
+  }
+
+  closeInChapterFind() {
+    if (this.findBarEl) {
+      this.findBarEl.remove();
+      this.findBarEl = null;
+    }
+    this.clearChapterFindHighlights();
+  }
+
+  clearChapterFindHighlights() {
+    for (const el of this.findMatches) {
+      const parent = el.parentNode;
+      if (!parent) continue;
+      const text = document.createTextNode(el.textContent || "");
+      parent.replaceChild(text, el);
+    }
+    this.findMatches = [];
+    this.findIndex = 0;
+    this.chapterRootEl?.normalize();
+  }
+
+  runChapterFind(query: string, counter: HTMLElement) {
+    this.clearChapterFindHighlights();
+    if (!query.trim()) {
+      counter.setText("");
+      return;
+    }
+    const q = query.toLowerCase();
+    const walker = document.createTreeWalker(
+      this.chapterRootEl,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode: (n) => {
+          // 跳过已经在 find / highlight 里的
+          const p = n.parentElement;
+          if (!p) return NodeFilter.FILTER_REJECT;
+          if (p.classList.contains("cr-find-hit"))
+            return NodeFilter.FILTER_REJECT;
+          return NodeFilter.FILTER_ACCEPT;
+        },
+      }
+    );
+    const nodes: Text[] = [];
+    let n: Node | null;
+    while ((n = walker.nextNode())) nodes.push(n as Text);
+    for (const node of nodes) {
+      let idx = 0;
+      const lower = node.data.toLowerCase();
+      const newNodes: Node[] = [];
+      while (true) {
+        const found = lower.indexOf(q, idx);
+        if (found < 0) {
+          if (idx < node.data.length) {
+            newNodes.push(
+              document.createTextNode(node.data.slice(idx))
+            );
+          }
+          break;
+        }
+        if (found > idx) {
+          newNodes.push(
+            document.createTextNode(node.data.slice(idx, found))
+          );
+        }
+        const span = document.createElement("span");
+        span.className = "cr-find-hit";
+        span.textContent = node.data.slice(found, found + q.length);
+        newNodes.push(span);
+        this.findMatches.push(span);
+        idx = found + q.length;
+      }
+      if (newNodes.length > 1 || (newNodes[0] && newNodes[0] !== node)) {
+        const parent = node.parentNode;
+        if (!parent) continue;
+        for (const nn of newNodes) parent.insertBefore(nn, node);
+        parent.removeChild(node);
+      }
+    }
+    if (this.findMatches.length === 0) {
+      counter.setText("无匹配");
+      return;
+    }
+    this.findIndex = 0;
+    counter.setText(`1 / ${this.findMatches.length}`);
+    this.highlightCurrentFind();
+  }
+
+  findStep(direction: 1 | -1) {
+    if (this.findMatches.length === 0) return;
+    this.findIndex =
+      (this.findIndex + direction + this.findMatches.length) %
+      this.findMatches.length;
+    const counter = this.findBarEl?.querySelector(
+      ".cr-find-counter"
+    ) as HTMLElement | null;
+    if (counter) {
+      counter.setText(`${this.findIndex + 1} / ${this.findMatches.length}`);
+    }
+    this.highlightCurrentFind();
+  }
+
+  highlightCurrentFind() {
+    for (let i = 0; i < this.findMatches.length; i++) {
+      this.findMatches[i].classList.toggle("active", i === this.findIndex);
+    }
+    const cur = this.findMatches[this.findIndex];
+    if (cur)
+      cur.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
   async addBookmarkHere() {
     if (!this.data || !this.book) return;
     const ch = this.book.chapters[this.chapterIndex];
@@ -1255,6 +1434,12 @@ export class ReaderView extends ItemView {
       if (!this.rootEl.isShown()) return;
       if (e.target instanceof HTMLInputElement) return;
       if (e.target instanceof HTMLTextAreaElement) return;
+      // Cmd/Ctrl+F → 章内查找
+      if ((e.metaKey || e.ctrlKey) && e.key === "f") {
+        e.preventDefault();
+        this.openInChapterFind();
+        return;
+      }
       if (e.key === "ArrowLeft" || e.key === "PageUp") {
         e.preventDefault();
         this.flipPage(-1);

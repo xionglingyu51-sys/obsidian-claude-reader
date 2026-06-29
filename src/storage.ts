@@ -7,8 +7,26 @@ import {
 
 const DATA_DIR = ".claude-reader";
 
+/** 用于通知插件 "annotation 改了" 的回调 */
+export type AnnotationChangeListener = (data: BookData) => void;
+
 export class BookStorage {
+  private listeners: Set<AnnotationChangeListener> = new Set();
+
   constructor(private app: App) {}
+
+  onAnnotationChanged(listener: AnnotationChangeListener) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private fire(data: BookData) {
+    for (const l of this.listeners) {
+      try {
+        l(data);
+      } catch {}
+    }
+  }
 
   async ensureDir() {
     if (!(await this.app.vault.adapter.exists(DATA_DIR))) {
@@ -56,6 +74,7 @@ export class BookStorage {
     if (i >= 0) data.highlights[i] = a;
     else data.highlights.push(a);
     await this.save(data);
+    this.fire(data);
   }
 
   /** 兼容旧 API */
@@ -68,6 +87,7 @@ export class BookStorage {
     if (!data) return;
     data.highlights = data.highlights.filter((x) => x.id !== id);
     await this.save(data);
+    this.fire(data);
   }
 
   async deleteHighlight(key: string, id: string) {

@@ -33,6 +33,10 @@ interface ClaudeReaderSettings {
   systemPrompt: string;
   templates: PromptTemplate[];
   exportFolder: string;
+  fontSize: number; // px
+  lineHeight: number; // 1.4 ~ 2.2
+  maxWidth: number; // px
+  autoSyncNotes: boolean;
 }
 
 const DEFAULT_SETTINGS: ClaudeReaderSettings = {
@@ -43,6 +47,10 @@ const DEFAULT_SETTINGS: ClaudeReaderSettings = {
     "你是一个友好、简洁的阅读助手。用户在读书,会发给你他选中的段落和问题。回答用 markdown,保持简短直接。",
   templates: DEFAULT_TEMPLATES,
   exportFolder: "Reading Notes",
+  fontSize: 17,
+  lineHeight: 1.75,
+  maxWidth: 720,
+  autoSyncNotes: false,
 };
 
 export type { PromptTemplate };
@@ -54,6 +62,13 @@ export default class ClaudeReaderPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
     this.storage = new BookStorage(this.app);
+
+    // 自动同步: storage 变化时若开启就静默写 markdown
+    this.storage.onAnnotationChanged(async (data) => {
+      if (!this.settings.autoSyncNotes) return;
+      // 用 debounce 避免连续多次划线触发多次写盘
+      this.scheduleAutoSync(data);
+    });
 
     this.registerView(
       VIEW_TYPE_READER,
@@ -135,6 +150,26 @@ export default class ClaudeReaderPlugin extends Plugin {
     });
 
     this.addSettingTab(new ClaudeReaderSettingTab(this.app, this));
+
+    this.applyReadingStyles();
+  }
+
+  styleEl: HTMLStyleElement | null = null;
+
+  applyReadingStyles() {
+    if (!this.styleEl) {
+      this.styleEl = document.createElement("style");
+      this.styleEl.id = "claude-reader-vars";
+      document.head.appendChild(this.styleEl);
+    }
+    const s = this.settings;
+    this.styleEl.textContent = `
+      .cr-chapter {
+        font-size: ${s.fontSize}px !important;
+        line-height: ${s.lineHeight} !important;
+        max-width: ${s.maxWidth}px !important;
+      }
+    `;
   }
 
   async exportBook(data: import("./types").BookData, bookFile: TFile | null) {
@@ -143,12 +178,55 @@ export default class ClaudeReaderPlugin extends Plugin {
         exportFolder: this.settings.exportFolder,
       });
       new Notice(`已导出 ${data.highlights.length} 条到 ${file.path}`);
-      // 在新 leaf 打开
       const leaf = this.app.workspace.getLeaf(false);
       await leaf.openFile(file);
     } catch (e) {
       new Notice("导出失败: " + (e as Error).message);
     }
+  }
+
+  /**
+   * 静默同步: 不打开 markdown,不弹 notice。autoSyncNotes 开启时由 storage 钩子触发。
+   */
+  async syncBookSilently(
+    data: import("./types").BookData,
+    bookFile: TFile | null
+  ) {
+    try {
+      await exportBookNotes(this.app, data, bookFile, {
+        exportFolder: this.settings.exportFolder,
+      });
+    } catch {
+      // 静默失败,不打扰
+    }
+  }
+
+  /** 自动同步: 用一个 short debounce 避免连续多次划线打风暴 */
+  private autoSyncTimers = new Map<string, number>();
+  scheduleAutoSync(data: import("./types").BookData) {
+    const prev = this.autoSyncTimers.get(data.bookKey);
+    if (prev) window.clearTimeout(prev);
+    const t = window.setTimeout(async () => {
+      this.autoSyncTimers.delete(data.bookKey);
+      // 找当前 bookFile
+      const books = this.app.vault
+        .getFiles()
+        .filter((f) =>
+          ["epub", "mobi", "azw3", "txt"].includes(
+            f.extension.toLowerCase()
+          )
+        );
+      let target: TFile | null = null;
+      for (const f of books) {
+        const k = await bookKeyFor(f);
+        if (k === data.bookKey) {
+          target = f;
+          break;
+        }
+      }
+      await this.syncBookSilently(data, target);
+    }, 1500);
+    this.autoSyncTimers.set(data.bookKey, t);
   }
 
   /** obsidian://claude-reader-jump 协议: 找到书的 sidecar -> 找 annotation -> 打开 reader -> 跳章节 -> 滚到附近 */
@@ -190,16 +268,30 @@ export default class ClaudeReaderPlugin extends Plugin {
     this.app.workspace.revealLeaf(leaf);
   }
 
+  conversations: import("./chat-view").Conversation[] = [];
+  activeConversationId: string | null = null;
+
   async loadSettings() {
-    this.settings = Object.assign(
-      {},
-      DEFAULT_SETTINGS,
-      await this.loadData()
-    );
+    const raw = ((await this.loadData()) ?? {}) as Partial<
+      ClaudeReaderSettings
+    > & {
+      conversations?: import("./chat-view").Conversation[];
+      activeConversationId?: string | null;
+    };
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, raw);
+    this.conversations = Array.isArray(raw.conversations)
+      ? raw.conversations
+      : [];
+    this.activeConversationId = raw.activeConversationId ?? null;
   }
 
   async saveSettings() {
-    await this.saveData(this.settings);
+    const payload = {
+      ...this.settings,
+      conversations: this.conversations,
+      activeConversationId: this.activeConversationId,
+    };
+    await this.saveData(payload);
   }
 
   async openBook(file: TFile) {
@@ -375,6 +467,65 @@ class ClaudeReaderSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+
+    new Setting(containerEl)
+      .setName("自动同步笔记到 markdown")
+      .setDesc("打开后,每次划线/写想法都自动写回导出文件夹的 markdown")
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.autoSyncNotes).onChange(async (v) => {
+          this.plugin.settings.autoSyncNotes = v;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    containerEl.createEl("h3", { text: "阅读体验" });
+
+    new Setting(containerEl)
+      .setName("字号 (px)")
+      .setDesc("阅读区正文字号, 12 ~ 28")
+      .addSlider((s) =>
+        s
+          .setLimits(12, 28, 1)
+          .setValue(this.plugin.settings.fontSize)
+          .setDynamicTooltip()
+          .onChange(async (v) => {
+            this.plugin.settings.fontSize = v;
+            await this.plugin.saveSettings();
+            this.plugin.applyReadingStyles();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("行距")
+      .setDesc("行高倍数, 1.3 ~ 2.4")
+      .addSlider((s) =>
+        s
+          .setLimits(13, 24, 1)
+          .setValue(Math.round(this.plugin.settings.lineHeight * 10))
+          .setDynamicTooltip()
+          .onChange(async (v) => {
+            this.plugin.settings.lineHeight = v / 10;
+            await this.plugin.saveSettings();
+            this.plugin.applyReadingStyles();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("阅读区最大宽度 (px)")
+      .setDesc("阅读区内容最大宽度, 480 ~ 1100")
+      .addSlider((s) =>
+        s
+          .setLimits(480, 1100, 20)
+          .setValue(this.plugin.settings.maxWidth)
+          .setDynamicTooltip()
+          .onChange(async (v) => {
+            this.plugin.settings.maxWidth = v;
+            await this.plugin.saveSettings();
+            this.plugin.applyReadingStyles();
+          })
+      );
+
+    containerEl.createEl("h3", { text: "AI" });
 
     new Setting(containerEl).setName("System prompt").setDesc("整体指令,所有对话生效").addTextArea((t) => {
       t.setValue(this.plugin.settings.systemPrompt).onChange(async (v) => {

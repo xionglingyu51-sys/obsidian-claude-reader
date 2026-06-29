@@ -1,4 +1,4 @@
-import { ItemView, TFile, WorkspaceLeaf, setIcon } from "obsidian";
+import { ItemView, Notice, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 import type ClaudeReaderPlugin from "./main";
 import { Annotation, BookData, COLORS, HighlightColor, NOTE_TYPES, NoteType } from "./types";
 
@@ -173,13 +173,61 @@ export class NotesPanelView extends ItemView {
 
   async exportAllBooks() {
     if (this.cached.length === 0) {
-      const { Notice } = await import("obsidian");
       new Notice("没有笔记可导出");
       return;
     }
     for (const { data, bookFile } of this.cached) {
       await this.plugin.exportBook(data, bookFile ?? null);
     }
+  }
+
+  beginInlineEdit(textEl: HTMLElement, a: Annotation) {
+    if (a.kind !== "note") return;
+    const ta = document.createElement("textarea");
+    ta.className = "cr-notes-card-inline-edit";
+    ta.value = a.note;
+    ta.rows = Math.max(2, Math.min(8, a.note.split("\n").length + 1));
+    textEl.replaceWith(ta);
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+
+    let finished = false;
+    const finish = async (save: boolean) => {
+      if (finished) return;
+      finished = true;
+      if (save && a.kind === "note") {
+        const newNote = ta.value.trim();
+        if (newNote && newNote !== a.note) {
+          a.note = newNote;
+          a.updatedAt = Date.now();
+          // 持久化
+          const cached = this.cached.find((c) =>
+            c.data.highlights.some((h) => h.id === a.id)
+          );
+          if (cached) {
+            await this.plugin.storage.upsertAnnotation(
+              cached.data.bookKey,
+              a,
+              cached.data.title
+            );
+          }
+        } else if (!newNote && a.kind === "note") {
+          // 清空 → 不动 (用户要删除走主 modal)
+        }
+      }
+      this.refresh();
+    };
+    ta.addEventListener("blur", () => finish(true));
+    ta.addEventListener("keydown", (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+        e.preventDefault();
+        finish(true);
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        finish(false);
+      }
+    });
   }
 
   renderList() {
@@ -342,7 +390,15 @@ export class NotesPanelView extends ItemView {
           text: `${typeMeta.emoji} ${typeMeta.label}`,
         });
       }
-      noteWrap.createDiv({ cls: "cr-notes-card-note-text", text: a.note });
+      const noteText = noteWrap.createDiv({
+        cls: "cr-notes-card-note-text",
+        text: a.note,
+        attr: { title: "点击编辑" },
+      });
+      noteText.onclick = (e) => {
+        e.stopPropagation();
+        this.beginInlineEdit(noteText, a);
+      };
     }
 
     // actions
