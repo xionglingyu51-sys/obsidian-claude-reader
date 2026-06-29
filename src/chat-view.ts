@@ -166,6 +166,27 @@ export class ChatView extends ItemView {
       Math.min(this.inputEl.scrollHeight, 160) + "px";
   }
 
+  appendSaveAsNoteBtn(
+    bubble: HTMLElement,
+    aiText: string,
+    src: AskContext
+  ) {
+    const row = bubble.createDiv({ cls: "cr-msg-actions" });
+    const btn = row.createEl("button", { cls: "cr-msg-action-btn" });
+    setIcon(btn.createSpan({ cls: "cr-msg-action-icon" }), "bookmark-plus");
+    btn.createSpan({ text: "存为蓝色想法" });
+    btn.onclick = async () => {
+      btn.disabled = true;
+      const ok = await this.plugin.saveAiAnswerAsNote(src, aiText);
+      if (ok) {
+        btn.empty();
+        btn.createSpan({ text: "已保存到笔记" });
+      } else {
+        btn.disabled = false;
+      }
+    };
+  }
+
   buildUserMessage(text: string): string {
     if (!this.pendingContext) return text;
     const c = this.pendingContext;
@@ -183,6 +204,8 @@ export class ChatView extends ItemView {
       return;
     }
 
+    // 记住这条消息的源选区,以便 AI 回答存为想法时知道贴回哪里
+    const sourceCtx = this.pendingContext;
     const fullText = this.buildUserMessage(text);
     this.pendingContext = null;
     this.renderContext();
@@ -226,6 +249,10 @@ export class ChatView extends ItemView {
               this
             );
             this.messages.push({ role: "assistant", content: acc });
+            // 如果用户带着选区上下文问的,AI 回答给一个「存为蓝色想法」按钮
+            if (sourceCtx) {
+              this.appendSaveAsNoteBtn(placeholder.bubble, acc, sourceCtx);
+            }
           } else {
             placeholder.content.createDiv({
               text: "(空回复)",

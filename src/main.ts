@@ -7,11 +7,12 @@ import {
   TFile,
   WorkspaceLeaf,
 } from "obsidian";
-import { BookStorage } from "./storage";
+import { BookStorage, bookKeyFor } from "./storage";
 import { ReaderView, VIEW_TYPE_READER } from "./reader-view";
 import { ChatView, VIEW_TYPE_CHAT, AskContext } from "./chat-view";
 import { BookshelfView, VIEW_TYPE_SHELF } from "./shelf-view";
 import { NotesPanelView, VIEW_TYPE_NOTES } from "./notes-panel";
+import { exportBookNotes } from "./export";
 
 interface PromptTemplate {
   label: string;
@@ -31,6 +32,7 @@ interface ClaudeReaderSettings {
   model: string;
   systemPrompt: string;
   templates: PromptTemplate[];
+  exportFolder: string;
 }
 
 const DEFAULT_SETTINGS: ClaudeReaderSettings = {
@@ -40,6 +42,7 @@ const DEFAULT_SETTINGS: ClaudeReaderSettings = {
   systemPrompt:
     "你是一个友好、简洁的阅读助手。用户在读书,会发给你他选中的段落和问题。回答用 markdown,保持简短直接。",
   templates: DEFAULT_TEMPLATES,
+  exportFolder: "Reading Notes",
 };
 
 export type { PromptTemplate };
@@ -110,7 +113,79 @@ export default class ClaudeReaderPlugin extends Plugin {
       callback: () => this.activateChat(),
     });
 
+    this.addCommand({
+      id: "export-current-book",
+      name: "导出当前书的所有笔记到 markdown",
+      callback: async () => {
+        const view = this.app.workspace
+          .getLeavesOfType(VIEW_TYPE_READER)
+          .map((l) => l.view)
+          .find((v) => v instanceof ReaderView) as ReaderView | undefined;
+        if (!view || !view.data) {
+          new Notice("先在阅读器里打开一本书");
+          return;
+        }
+        await this.exportBook(view.data, view.file);
+      },
+    });
+
+    // obsidian://claude-reader-jump?book=...&id=...
+    this.registerObsidianProtocolHandler("claude-reader-jump", async (p) => {
+      await this.jumpToAnnotation(p.book, p.id);
+    });
+
     this.addSettingTab(new ClaudeReaderSettingTab(this.app, this));
+  }
+
+  async exportBook(data: import("./types").BookData, bookFile: TFile | null) {
+    try {
+      const file = await exportBookNotes(this.app, data, bookFile, {
+        exportFolder: this.settings.exportFolder,
+      });
+      new Notice(`已导出 ${data.highlights.length} 条到 ${file.path}`);
+      // 在新 leaf 打开
+      const leaf = this.app.workspace.getLeaf(false);
+      await leaf.openFile(file);
+    } catch (e) {
+      new Notice("导出失败: " + (e as Error).message);
+    }
+  }
+
+  /** obsidian://claude-reader-jump 协议: 找到书的 sidecar -> 找 annotation -> 打开 reader -> 跳章节 -> 滚到附近 */
+  async jumpToAnnotation(bookKey: string, annId: string) {
+    if (!bookKey || !annId) return;
+    // 通过遍历 vault 里的 epub 找到对应 bookKey
+    const epubs = this.app.vault
+      .getFiles()
+      .filter((f) => f.extension === "epub");
+    let target: TFile | null = null;
+    for (const f of epubs) {
+      const k = await bookKeyFor(f);
+      if (k === bookKey) {
+        target = f;
+        break;
+      }
+    }
+    if (!target) {
+      new Notice("找不到对应的 EPUB (可能已删除或重命名)");
+      return;
+    }
+    // 找 annotation
+    const data = await this.storage.load(bookKey);
+    if (!data) return;
+    const ann = data.highlights.find((a) => a.id === annId);
+    if (!ann) {
+      new Notice("找不到这条笔记");
+      return;
+    }
+    // 打开 reader
+    const leaf = this.app.workspace.getLeaf(false);
+    await leaf.setViewState({
+      type: VIEW_TYPE_READER,
+      state: { file: target.path, jumpToAnnotationId: annId },
+      active: true,
+    });
+    this.app.workspace.revealLeaf(leaf);
   }
 
   async loadSettings() {
@@ -185,6 +260,64 @@ export default class ClaudeReaderPlugin extends Plugin {
     const chat = await this.activateChat();
     if (chat) chat.setContextAndSend(ctx, prompt);
   }
+
+  /**
+   * AI 回答存为「蓝色想法」:
+   * - 找到 reader 中对应这段文字的 highlight (或当作新选区,要求 reader 在 active 状态)
+   * - 如果当前 reader 里能找到这段文字 → 创建一个蓝色 NoteAnnotation
+   * - 否则只能存到剪贴板提示用户手动贴
+   */
+  async saveAiAnswerAsNote(
+    ctx: AskContext,
+    aiAnswer: string
+  ): Promise<boolean> {
+    const view = this.app.workspace
+      .getLeavesOfType(VIEW_TYPE_READER)
+      .map((l) => l.view)
+      .find((v) => v instanceof ReaderView) as ReaderView | undefined;
+    if (!view || !view.data || !view.book) {
+      new Notice("请先在 Claude Reader 里打开一本书");
+      return false;
+    }
+    if (!ctx.selection) {
+      new Notice("没有源选区,无法定位");
+      return false;
+    }
+    // 在当前 reader 的高亮列表里找文字匹配的
+    const exist = view.data.highlights.find(
+      (a) => a.text.trim() === ctx.selection.trim()
+    );
+    const note: import("./types").NoteAnnotation = exist
+      ? {
+          ...exist,
+          kind: "note",
+          color: "blue",
+          note: aiAnswer,
+          noteType: "insight",
+          updatedAt: Date.now(),
+        }
+      : await view.createAnnotationFromText(ctx.selection, {
+          color: "blue",
+          note: aiAnswer,
+          noteType: "insight",
+        });
+    if (!note) {
+      new Notice("没找到这段文字在当前章节里,无法定位");
+      return false;
+    }
+    await this.storage.upsertAnnotation(
+      view.data.bookKey,
+      note,
+      view.data.title
+    );
+    const idx = view.data.highlights.findIndex((x) => x.id === note.id);
+    if (idx >= 0) view.data.highlights[idx] = note;
+    else view.data.highlights.push(note);
+    // 重渲染当前章节
+    await view.gotoChapter(view.chapterIndex, view.scrollPercent());
+    new Notice("已存为蓝色 AI 想法");
+    return true;
+  }
 }
 
 class ClaudeReaderSettingTab extends PluginSettingTab {
@@ -228,6 +361,19 @@ class ClaudeReaderSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         })
     );
+    new Setting(containerEl)
+      .setName("笔记导出文件夹")
+      .setDesc("导出 markdown 笔记会放在这个文件夹下,按书名命名")
+      .addText((t) =>
+        t
+          .setPlaceholder("Reading Notes")
+          .setValue(this.plugin.settings.exportFolder)
+          .onChange(async (v) => {
+            this.plugin.settings.exportFolder = v.trim() || "Reading Notes";
+            await this.plugin.saveSettings();
+          })
+      );
+
     new Setting(containerEl).setName("System prompt").setDesc("整体指令,所有对话生效").addTextArea((t) => {
       t.setValue(this.plugin.settings.systemPrompt).onChange(async (v) => {
         this.plugin.settings.systemPrompt = v;

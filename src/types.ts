@@ -23,6 +23,7 @@ export const NOTE_TYPES: { value: NoteType; label: string; emoji: string }[] = [
 export interface BaseAnnotation {
   id: string;
   chapterId: string;
+  chapterTitle?: string;
   startPath: number[];
   startOffset: number;
   endPath: number[];

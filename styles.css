@@ -882,3 +882,62 @@
   width: 12px;
   height: 12px;
 }
+
+/* ---------- Flash on jump-to-annotation ---------- */
+.cr-hl-flash {
+  animation: cr-flash 1.4s ease-out;
+}
+@keyframes cr-flash {
+  0% { box-shadow: 0 0 0 4px rgba(217, 119, 87, 0.6); }
+  100% { box-shadow: 0 0 0 4px rgba(217, 119, 87, 0); }
+}
+
+/* ---------- "存为蓝色想法" 按钮 ---------- */
+.cr-msg-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+.cr-msg-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.cr-msg-action-btn:hover {
+  background: rgba(158, 178, 196, 0.18);
+  border-color: rgba(158, 178, 196, 0.6);
+  color: var(--text-normal);
+}
+.cr-msg-action-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.cr-msg-action-icon .svg-icon {
+  width: 12px;
+  height: 12px;
+}
+
+/* ---------- Callout colors for exported markdown ---------- */
+.callout[data-callout="claude-yellow"] {
+  --callout-color: 212, 192, 142;
+  --callout-icon: lucide-highlighter;
+}
+.callout[data-callout="claude-green"] {
+  --callout-color: 166, 184, 161;
+  --callout-icon: lucide-help-circle;
+}
+.callout[data-callout="claude-pink"] {
+  --callout-color: 196, 165, 168;
+  --callout-icon: lucide-alert-triangle;
+}
+.callout[data-callout="claude-blue"] {
+  --callout-color: 158, 178, 196;
+  --callout-icon: lucide-sparkles;
+}

@@ -43,6 +43,15 @@ export class NotesPanelView extends ItemView {
     const header = this.rootEl.createDiv({ cls: "cr-notes-header" });
     header.createEl("span", { text: "笔记", cls: "cr-notes-title" });
     this.countEl = header.createEl("span", { cls: "cr-notes-count" });
+    // 导出当前书按钮 (按选中卡片背后的书)
+    const exportAll = header.createEl("button", {
+      cls: "cr-icon-btn",
+    });
+    setIcon(exportAll, "file-down");
+    exportAll.setAttr("aria-label", "导出全部书的笔记");
+    exportAll.onclick = async () => {
+      await this.exportAllBooks();
+    };
 
     const searchWrap = this.rootEl.createDiv({ cls: "cr-notes-search" });
     setIcon(searchWrap.createSpan({ cls: "cr-notes-search-icon" }), "search");
@@ -133,6 +142,17 @@ export class NotesPanelView extends ItemView {
     }
     this.cached = all;
     this.renderList();
+  }
+
+  async exportAllBooks() {
+    if (this.cached.length === 0) {
+      const { Notice } = await import("obsidian");
+      new Notice("没有笔记可导出");
+      return;
+    }
+    for (const { data, bookFile } of this.cached) {
+      await this.plugin.exportBook(data, bookFile ?? null);
+    }
   }
 
   renderList() {

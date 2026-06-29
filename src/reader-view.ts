@@ -53,15 +53,17 @@ export class ReaderView extends ItemView {
 
   async setState(state: any, result: any): Promise<void> {
     await super.setState(state, result);
-    // Obsidian 默认走 state.file (FileView 约定);我们也兼容 filePath
     const path: string | undefined = state?.file ?? state?.filePath;
+    const jumpId: string | undefined = state?.jumpToAnnotationId;
     if (path && path !== this.file?.path) {
       const f = this.app.vault.getAbstractFileByPath(path);
       if (f instanceof TFile) {
-        await this.openFile(f);
+        await this.openFile(f, jumpId);
       } else {
         this.showError(`找不到文件: ${path}`);
       }
+    } else if (jumpId && this.data) {
+      await this.scrollToAnnotation(jumpId);
     }
   }
 
@@ -121,6 +123,14 @@ export class ReaderView extends ItemView {
     themeBtn.setAttr("aria-label", "主题");
     themeBtn.onclick = () => this.cycleTheme();
 
+    // 导出按钮
+    const exportBtn = header.createEl("button", { cls: "cr-icon-btn" });
+    setIcon(exportBtn, "file-down");
+    exportBtn.setAttr("aria-label", "导出笔记到 markdown");
+    exportBtn.onclick = () => {
+      if (this.data) this.plugin.exportBook(this.data, this.file);
+    };
+
     // body
     const body = this.rootEl.createDiv({ cls: "cr-body" });
     this.tocEl = body.createDiv({ cls: "cr-toc" });
@@ -161,7 +171,7 @@ export class ReaderView extends ItemView {
 
   navIndicatorEl!: HTMLElement;
 
-  async openFile(file: TFile) {
+  async openFile(file: TFile, jumpToAnnId?: string) {
     this.file = file;
     this.contentEl_?.empty?.();
     this.chapterRootEl?.empty?.();
@@ -190,8 +200,32 @@ export class ReaderView extends ItemView {
     this.renderShell();
     this.renderToc();
 
-    const initial = this.data.progress?.chapterIndex ?? 0;
-    await this.gotoChapter(initial, this.data.progress?.scrollPercent ?? 0);
+    if (jumpToAnnId) {
+      await this.scrollToAnnotation(jumpToAnnId);
+    } else {
+      const initial = this.data.progress?.chapterIndex ?? 0;
+      await this.gotoChapter(initial, this.data.progress?.scrollPercent ?? 0);
+    }
+  }
+
+  async scrollToAnnotation(annId: string) {
+    if (!this.data || !this.book) return;
+    const ann = this.data.highlights.find((a) => a.id === annId);
+    if (!ann) return;
+    const chIdx = this.book.chapters.findIndex((c) => c.id === ann.chapterId);
+    if (chIdx < 0) return;
+    await this.gotoChapter(chIdx, 0);
+    // 等渲染完再 scrollIntoView 那个高亮 span
+    requestAnimationFrame(() => {
+      const el = this.chapterRootEl.querySelector(
+        `[data-hl-id="${annId}"]`
+      );
+      if (el instanceof HTMLElement) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.classList.add("cr-hl-flash");
+        window.setTimeout(() => el.classList.remove("cr-hl-flash"), 1600);
+      }
+    });
   }
 
   renderToc() {
@@ -537,6 +571,7 @@ export class ReaderView extends ItemView {
       id: now.toString(36) + Math.random().toString(36).slice(2, 6),
       kind: "highlight",
       chapterId: ch.id,
+      chapterTitle: ch.title,
       ...info,
       color,
       style: "fill",
@@ -652,6 +687,72 @@ export class ReaderView extends ItemView {
     const max =
       this.contentEl_.scrollHeight - this.contentEl_.clientHeight;
     return max > 0 ? this.contentEl_.scrollTop / max : 0;
+  }
+
+  /**
+   * 给一段文字,在当前章节 DOM 里找匹配位置,创建 NoteAnnotation。
+   * 用于 AI 回答存为想法时,源选区已经丢失的情况。
+   * 返回 null 表示在当前章节里找不到。
+   */
+  async createAnnotationFromText(
+    text: string,
+    opts: {
+      color: HighlightColor;
+      note: string;
+      noteType: NoteType;
+    }
+  ): Promise<import("./types").NoteAnnotation | null> {
+    if (!this.book || !this.data) return null;
+    const target = text.trim();
+    if (!target) return null;
+    // 用 TreeWalker 找包含此文字的第一个文本节点
+    this.chapterRootEl.normalize();
+    const walker = document.createTreeWalker(
+      this.chapterRootEl,
+      NodeFilter.SHOW_TEXT
+    );
+    let n: Node | null;
+    let startNode: Text | null = null;
+    let startOff = 0;
+    let endNode: Text | null = null;
+    let endOff = 0;
+    while ((n = walker.nextNode())) {
+      const t = n as Text;
+      const idx = t.data.indexOf(target);
+      if (idx >= 0) {
+        startNode = t;
+        startOff = idx;
+        endNode = t;
+        endOff = idx + target.length;
+        break;
+      }
+    }
+    if (!startNode || !endNode) {
+      // 单节点没找到,尝试跨节点 (粗暴: 拼成一段 plaintext 找 index)
+      // 限于实现复杂度,这里先放弃跨节点匹配,直接返回 null
+      return null;
+    }
+    const range = document.createRange();
+    range.setStart(startNode, startOff);
+    range.setEnd(endNode, endOff);
+    const info = highlightFromRange(range, this.chapterRootEl);
+    if (!info) return null;
+    const ch = this.book.chapters[this.chapterIndex];
+    const now = Date.now();
+    const note: import("./types").NoteAnnotation = {
+      id: now.toString(36) + Math.random().toString(36).slice(2, 6),
+      kind: "note",
+      chapterId: ch.id,
+      chapterTitle: ch.title,
+      ...info,
+      color: opts.color,
+      style: "fill",
+      note: opts.note,
+      noteType: opts.noteType,
+      createdAt: now,
+      updatedAt: now,
+    };
+    return note;
   }
 
   askClaudeAbout(text: string) {
