@@ -290,6 +290,8 @@ export class ReaderView extends ItemView {
 
   // ---------- Selection toolbar ----------
   selectionCheckTimer: number | null = null;
+  outsideClickHandler: ((e: Event) => void) | null = null;
+
   scheduleSelectionCheck(delay = 0) {
     if (this.selectionCheckTimer) window.clearTimeout(this.selectionCheckTimer);
     this.selectionCheckTimer = window.setTimeout(() => {
@@ -300,30 +302,15 @@ export class ReaderView extends ItemView {
 
   onSelectionChange() {
     const sel = window.getSelection();
-    if (!sel || sel.isCollapsed) {
-      this.scheduleRemoveToolbar();
-      return;
-    }
+    // 工具条已经存在时,不因为选区变化而关闭——靠 outside click 关闭
+    if (this.toolbarEl) return;
+    if (!sel || sel.isCollapsed) return;
     const range = sel.getRangeAt(0);
-    if (!this.chapterRootEl.contains(range.commonAncestorContainer)) {
-      this.scheduleRemoveToolbar();
-      return;
-    }
-    if (!sel.toString().trim()) {
-      this.scheduleRemoveToolbar();
-      return;
-    }
+    if (!this.chapterRootEl.contains(range.commonAncestorContainer)) return;
+    if (!sel.toString().trim()) return;
     const rect = range.getBoundingClientRect();
     if (rect.width === 0 && rect.height === 0) return;
     this.showToolbar(rect, range);
-  }
-
-  scheduleRemoveToolbar() {
-    if (this.toolbarTimer) return;
-    this.toolbarTimer = window.setTimeout(() => {
-      this.removeToolbar();
-      this.toolbarTimer = null;
-    }, 120);
   }
 
   removeToolbar() {
@@ -331,14 +318,22 @@ export class ReaderView extends ItemView {
       this.toolbarEl.remove();
       this.toolbarEl = null;
     }
-    if (this.toolbarTimer) {
-      window.clearTimeout(this.toolbarTimer);
-      this.toolbarTimer = null;
+    if (this.outsideClickHandler) {
+      document.removeEventListener("pointerdown", this.outsideClickHandler, true);
+      this.outsideClickHandler = null;
+    }
+    if (this.selectionCheckTimer) {
+      window.clearTimeout(this.selectionCheckTimer);
+      this.selectionCheckTimer = null;
     }
   }
 
   showToolbar(rect: DOMRect, range: Range) {
     this.removeToolbar();
+    // 提前快照选中文字,防止 iOS 上 range 被吃掉
+    const selectedText = range.toString();
+    const savedRange = range.cloneRange();
+
     const tb = document.body.createDiv({ cls: "cr-toolbar" });
 
     // 阻止点工具条本身导致选区被清掉
@@ -356,7 +351,7 @@ export class ReaderView extends ItemView {
       dot.style.background = COLORS[c].fill;
       dot.onclick = (e) => {
         e.stopPropagation();
-        this.addHighlight(range.cloneRange(), c);
+        this.addHighlight(savedRange.cloneRange(), c);
         window.getSelection()?.removeAllRanges();
         this.removeToolbar();
       };
@@ -368,7 +363,7 @@ export class ReaderView extends ItemView {
     ai.setAttr("aria-label", "问 Claude");
     ai.onclick = (e) => {
       e.stopPropagation();
-      this.askClaudeAbout(range.toString());
+      this.askClaudeAbout(selectedText);
       window.getSelection()?.removeAllRanges();
       this.removeToolbar();
     };
@@ -379,7 +374,7 @@ export class ReaderView extends ItemView {
     copy.setAttr("aria-label", "复制");
     copy.onclick = (e) => {
       e.stopPropagation();
-      navigator.clipboard.writeText(range.toString());
+      navigator.clipboard.writeText(selectedText);
       window.getSelection()?.removeAllRanges();
       this.removeToolbar();
     };
@@ -394,6 +389,24 @@ export class ReaderView extends ItemView {
     tb.style.left = `${left}px`;
 
     this.toolbarEl = tb;
+
+    // 点工具条外部才关闭
+    this.outsideClickHandler = (e: Event) => {
+      const target = e.target as Node;
+      if (tb.contains(target)) return;
+      // 如果用户点在 chapter 区域内并产生了新选区,onSelectionChange 会重开
+      this.removeToolbar();
+    };
+    // 用 setTimeout 避免立刻被同一次点击关掉
+    window.setTimeout(() => {
+      if (this.outsideClickHandler) {
+        document.addEventListener(
+          "pointerdown",
+          this.outsideClickHandler,
+          true
+        );
+      }
+    }, 50);
   }
 
   async addHighlight(range: Range, color: HighlightColor) {
