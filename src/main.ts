@@ -81,7 +81,7 @@ export default class ClaudeReaderPlugin extends Plugin {
     const leaf = this.app.workspace.getLeaf(false);
     await leaf.setViewState({
       type: VIEW_TYPE_READER,
-      state: { filePath: file.path },
+      state: { file: file.path },
       active: true,
     });
     this.app.workspace.revealLeaf(leaf);

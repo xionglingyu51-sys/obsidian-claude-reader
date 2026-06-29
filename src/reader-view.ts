@@ -48,15 +48,28 @@ export class ReaderView extends ItemView {
   }
 
   async setState(state: any, result: any): Promise<void> {
-    if (state?.filePath) {
-      const f = this.app.vault.getAbstractFileByPath(state.filePath);
-      if (f instanceof TFile) await this.openFile(f);
+    await super.setState(state, result);
+    // Obsidian 默认走 state.file (FileView 约定);我们也兼容 filePath
+    const path: string | undefined = state?.file ?? state?.filePath;
+    if (path && path !== this.file?.path) {
+      const f = this.app.vault.getAbstractFileByPath(path);
+      if (f instanceof TFile) {
+        await this.openFile(f);
+      } else {
+        this.showError(`找不到文件: ${path}`);
+      }
     }
-    return super.setState(state, result);
   }
 
   getState(): any {
-    return { filePath: this.file?.path };
+    return { file: this.file?.path, filePath: this.file?.path };
+  }
+
+  showError(msg: string) {
+    if (!this.rootEl) return;
+    this.rootEl.empty();
+    const e = this.rootEl.createDiv({ cls: "cr-shelf-empty" });
+    e.setText(msg);
   }
 
   async onOpen() {
@@ -65,7 +78,13 @@ export class ReaderView extends ItemView {
     root.addClass("cr-root");
     this.rootEl = root;
 
-    this.renderShell();
+    // 如果还没收到 setState (file 还没就位),显示加载占位
+    if (!this.file) {
+      const placeholder = this.rootEl.createDiv({ cls: "cr-shelf-empty" });
+      placeholder.setText("正在加载...");
+    } else {
+      this.renderShell();
+    }
   }
 
   async onClose() {
