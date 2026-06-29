@@ -29,6 +29,10 @@ export interface BaseAnnotation {
   endPath: number[];
   endOffset: number;
   text: string;
+  /** 选区前 32 字符的上下文 (用于 text-based 重定位时排除重复匹配) */
+  prefix?: string;
+  /** 选区后 32 字符的上下文 */
+  suffix?: string;
   color: HighlightColor;
   style: HighlightStyle;
   createdAt: number;

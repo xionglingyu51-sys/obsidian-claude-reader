@@ -191,13 +191,19 @@ function parseMobiBook(u8: Uint8Array): MobiResult {
   const headerLength = dv.getUint32(rec0Start + 20, false);
   // textEncoding @ rec0Start+28: 1252=cp1252, 65001=utf-8
   const textEncoding = dv.getUint32(rec0Start + 28, false);
+  // MOBI version @ rec0Start+36 — 决定 header 是否含 0xF2 extraDataFlags
+  const mobiVersion =
+    rec0Start + 40 <= u8.length
+      ? dv.getUint32(rec0Start + 36, false)
+      : 0;
   // fullNameOffset @ rec0Start+84, fullNameLength @ rec0Start+88
   const fullNameOffset = dv.getUint32(rec0Start + 84, false);
   const fullNameLength = dv.getUint32(rec0Start + 88, false);
 
-  // extra data flags @ MOBI header offset 0xF2 (header 必须长到能容下)
+  // extra data flags @ MOBI header offset 0xF2 (仅 mobiVersion >= 5 才有效)
   let extraDataFlags = 0;
   if (
+    mobiVersion >= 5 &&
     headerLength >= 0xf4 &&
     rec0Start + 0xf2 + 2 <= u8.length
   ) {
@@ -322,50 +328,59 @@ function decodeMobiString(bytes: Uint8Array, encoding: number): string {
 /**
  * MOBI 每条 PalmDoc 记录的末尾可能有 trailing entries (元数据,不是正文)。
  * 根据 MOBI header 0xF2 处的 extra-data-flags 位决定有哪些 entries 要剥掉。
- * 每个 entry 的长度存在末尾的可变长度编码 (backwards encoded varint, 高位是终止标志)。
- * Multi-byte indicator (flag bit 0) 特殊: 末尾 1 字节,低 2 位是要剥的字节数。
+ *
+ * 注意 bit 0 (multibyte indicator) 在「其他 bits」之后剥,即最先在末尾被消耗。
  *
  * 参考: https://wiki.mobileread.com/wiki/MOBI#Trailing_entries
  */
 function stripTrailingEntries(data: Uint8Array, flags: number): Uint8Array {
   if (flags === 0) return data;
   let end = data.length;
-  // 先处理 bit 1..15 (按位检查,每个 bit 表示一种 trailing entry)
+
+  // Step 1: 先剥 bit 1..15 (从最高 bit 往最低 bit 倒序剥, 末尾的先剥)
   for (let bit = 15; bit >= 1; bit--) {
     if ((flags & (1 << bit)) === 0) continue;
     const size = readBackwardVarint(data, end);
+    if (size === 0 || size > end) return data; // 异常,放弃剥
     end -= size;
-    if (end < 0) return data; // 数据异常,放弃剥
   }
-  // 处理 bit 0: multi-byte 字符指示符
+
+  // Step 2: 最后处理 bit 0 (multibyte char indicator)
   if ((flags & 1) !== 0) {
     if (end <= 0) return data;
     const last = data[end - 1];
     const skip = (last & 0x3) + 1;
+    if (skip > end) return data;
     end -= skip;
-    if (end < 0) return data;
   }
+
   return data.slice(0, end);
 }
 
 /**
- * 反向读 varint: 从 endExclusive 往前找,直到遇到高位为 1 的字节为止。
- * 返回这段 varint 表示的 entry 长度 (含 varint 自身)。
+ * 反向 varint: 从末尾往前读,直到遇到「高位为 1」的字节为止,
+ * 那个字节是 varint 的「第一字节」(最高 7 位)。
+ * 每个字节的低 7 位贡献 value, 高位 1 标记结束 (从右向左读时,第一个高位=1 的字节)。
+ *
+ * 返回的是这条 trailing entry 的「总长度」(含 varint 自身字节数)。
  */
 function readBackwardVarint(data: Uint8Array, endExclusive: number): number {
-  let value = 0;
-  let bytesUsed = 0;
-  for (let i = endExclusive - 1; i >= 0 && bytesUsed < 4; i--) {
+  // 我们从右往左累积。最后读到的高位=1 字节是 MSB。
+  const bytes: number[] = [];
+  for (let i = endExclusive - 1; i >= 0 && bytes.length < 4; i--) {
     const b = data[i];
-    bytesUsed++;
+    bytes.push(b & 0x7f);
     if ((b & 0x80) !== 0) {
-      // 终止字节: 高位是 1
-      value = (value << 7) | (b & 0x7f);
+      // 这是终止字节 (varint 的第一字节, 在数组里是最后一个)
+      // 按从 MSB 到 LSB 拼回去
+      let value = 0;
+      for (let k = bytes.length - 1; k >= 0; k--) {
+        value = (value << 7) | bytes[k];
+      }
       return value;
     }
-    value = (value << 7) | (b & 0x7f);
   }
-  return value;
+  return 0;
 }
 
 function concatU8(arrs: Uint8Array[]): Uint8Array {
