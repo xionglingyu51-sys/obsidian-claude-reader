@@ -1024,3 +1024,23 @@
   0% { background: rgba(217, 119, 87, 0.6); }
   100% { background: rgba(217, 119, 87, 0); }
 }
+
+/* ---------- Shelf cover reading time badge ---------- */
+.cr-shelf-cover {
+  position: relative;
+}
+.cr-shelf-cover-time {
+  position: absolute;
+  bottom: 6px;
+  right: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  pointer-events: none;
+  font-weight: 500;
+}
+.theme-dark .cr-shelf-cover-time {
+  background: rgba(0, 0, 0, 0.7);
+}
