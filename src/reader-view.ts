@@ -1,8 +1,10 @@
 import { App, ItemView, Modal, Notice, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 import type ClaudeReaderPlugin from "./main";
 import { EpubBook, parseEpub } from "./epub";
+import { parseBook, SUPPORTED_EXTENSIONS } from "./book-parser";
 import {
   BookData,
+  Bookmark,
   COLORS,
   Highlight,
   HighlightColor,
@@ -237,6 +239,17 @@ export class ReaderView extends ItemView {
     searchBtn.setAttr("aria-label", "全书搜索");
     searchBtn.onclick = () => this.openSearchModal();
 
+    // 书签
+    const bookmarkBtn = header.createEl("button", { cls: "cr-icon-btn" });
+    setIcon(bookmarkBtn, "bookmark");
+    bookmarkBtn.setAttr("aria-label", "添加书签到当前位置");
+    bookmarkBtn.onclick = () => this.addBookmarkHere();
+
+    const bookmarkListBtn = header.createEl("button", { cls: "cr-icon-btn" });
+    setIcon(bookmarkListBtn, "bookmark-check");
+    bookmarkListBtn.setAttr("aria-label", "书签列表");
+    bookmarkListBtn.onclick = () => this.toggleBookmarkPanel();
+
     // body
     const body = this.rootEl.createDiv({ cls: "cr-body" });
     this.tocEl = body.createDiv({ cls: "cr-toc" });
@@ -284,9 +297,9 @@ export class ReaderView extends ItemView {
 
     try {
       const buf = await this.app.vault.readBinary(file);
-      this.book = await parseEpub(buf);
+      this.book = await parseBook(buf, file.name);
     } catch (e) {
-      new Notice(`解析 EPUB 失败: ${(e as Error).message}`);
+      new Notice(`解析失败: ${(e as Error).message}`);
       return;
     }
 
@@ -301,6 +314,9 @@ export class ReaderView extends ItemView {
         readingSeconds: 0,
       };
     this.data.lastOpenedAt = Date.now();
+    await this.plugin.storage.save(this.data);
+
+    this.ensureChapterChars();
     await this.plugin.storage.save(this.data);
 
     this.renderShell();
@@ -414,18 +430,23 @@ export class ReaderView extends ItemView {
 
   updateNavIndicator() {
     if (!this.book || !this.navIndicatorEl) return;
-    const total = this.book.chapters.length;
     const cur = this.chapterIndex + 1;
+    const total = this.book.chapters.length;
+    const pct = Math.round(this.overallProgress() * 100);
     const seconds = this.data?.readingSeconds ?? 0;
     const timeStr = formatReadingTime(seconds);
-    this.navIndicatorEl.setText(`${cur} / ${total} · ${timeStr}`);
-    // 切换章节时短暂高亮提示
+    const remaining = this.estimateRemainingSeconds();
+    const remStr =
+      remaining !== null ? ` · 剩 ${formatReadingTime(remaining)}` : "";
+    this.navIndicatorEl.setText(
+      `${cur}/${total} · ${pct}% · ${timeStr}${remStr}`
+    );
     this.navIndicatorEl.addClass("show");
     if (this.indicatorTimer) window.clearTimeout(this.indicatorTimer);
     this.indicatorTimer = window.setTimeout(() => {
       this.navIndicatorEl.removeClass("show");
       this.indicatorTimer = null;
-    }, 2000);
+    }, 2400);
   }
 
   indicatorTimer: number | null = null;
@@ -892,6 +913,175 @@ export class ReaderView extends ItemView {
       this.pendingSearchQuery = query;
       await this.gotoChapter(chapterIndex, 0);
     }).open();
+  }
+
+  // ---------- Bookmarks ----------
+  async addBookmarkHere() {
+    if (!this.data || !this.book) return;
+    const ch = this.book.chapters[this.chapterIndex];
+    const snippet = this.firstVisibleParagraphText();
+    const defaultLabel =
+      snippet.slice(0, 24) || `${ch.title} · ${Math.round(this.scrollPercent() * 100)}%`;
+    const label = window.prompt("书签名字", defaultLabel)?.trim();
+    if (!label) return;
+    const bm: Bookmark = {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      chapterId: ch.id,
+      chapterTitle: ch.title,
+      scrollPercent: this.scrollPercent(),
+      label,
+      snippet: snippet.slice(0, 80) || undefined,
+      createdAt: Date.now(),
+    };
+    if (!this.data.bookmarks) this.data.bookmarks = [];
+    this.data.bookmarks.push(bm);
+    await this.plugin.storage.save(this.data);
+    new Notice("已添加书签");
+  }
+
+  firstVisibleParagraphText(): string {
+    if (!this.chapterRootEl) return "";
+    const rect = this.contentEl_.getBoundingClientRect();
+    const ps = Array.from(
+      this.chapterRootEl.querySelectorAll("p, h1, h2, h3, li")
+    );
+    for (const p of ps) {
+      const r = p.getBoundingClientRect();
+      if (r.bottom >= rect.top + 20 && r.top <= rect.bottom) {
+        return (p.textContent || "").trim();
+      }
+    }
+    return "";
+  }
+
+  bookmarkPanelOpen = false;
+  bookmarkPanelEl: HTMLElement | null = null;
+  toggleBookmarkPanel() {
+    if (this.bookmarkPanelOpen) {
+      this.closeBookmarkPanel();
+    } else {
+      this.openBookmarkPanel();
+    }
+  }
+
+  openBookmarkPanel() {
+    if (!this.data || !this.book) return;
+    this.closeBookmarkPanel();
+    const panel = this.rootEl.createDiv({ cls: "cr-bookmark-panel" });
+    const head = panel.createDiv({ cls: "cr-bookmark-head" });
+    head.createSpan({ text: "书签", cls: "cr-bookmark-head-title" });
+    const close = head.createEl("button", { cls: "cr-icon-btn" });
+    setIcon(close, "x");
+    close.onclick = () => this.closeBookmarkPanel();
+
+    const list = panel.createDiv({ cls: "cr-bookmark-list" });
+    const bms = this.data.bookmarks ?? [];
+    if (bms.length === 0) {
+      list.createDiv({
+        cls: "cr-bookmark-empty",
+        text: "还没有书签。点书签图标加一个。",
+      });
+    } else {
+      const sorted = [...bms].sort((a, b) => b.createdAt - a.createdAt);
+      for (const bm of sorted) {
+        const item = list.createDiv({ cls: "cr-bookmark-item" });
+        const main = item.createDiv({ cls: "cr-bookmark-main" });
+        main.createDiv({ cls: "cr-bookmark-label", text: bm.label });
+        if (bm.chapterTitle) {
+          main.createDiv({
+            cls: "cr-bookmark-chapter",
+            text: `${bm.chapterTitle} · ${Math.round(bm.scrollPercent * 100)}%`,
+          });
+        }
+        if (bm.snippet) {
+          main.createDiv({ cls: "cr-bookmark-snippet", text: bm.snippet });
+        }
+        main.onclick = () => {
+          this.jumpToBookmark(bm);
+          this.closeBookmarkPanel();
+        };
+        const del = item.createEl("button", { cls: "cr-bookmark-del" });
+        setIcon(del, "trash-2");
+        del.onclick = async (e) => {
+          e.stopPropagation();
+          this.data!.bookmarks = this.data!.bookmarks!.filter(
+            (x) => x.id !== bm.id
+          );
+          await this.plugin.storage.save(this.data!);
+          this.openBookmarkPanel(); // 重渲染
+        };
+      }
+    }
+
+    this.bookmarkPanelEl = panel;
+    this.bookmarkPanelOpen = true;
+  }
+
+  closeBookmarkPanel() {
+    if (this.bookmarkPanelEl) {
+      this.bookmarkPanelEl.remove();
+      this.bookmarkPanelEl = null;
+    }
+    this.bookmarkPanelOpen = false;
+  }
+
+  async jumpToBookmark(bm: Bookmark) {
+    if (!this.book) return;
+    const idx = this.book.chapters.findIndex((c) => c.id === bm.chapterId);
+    if (idx < 0) {
+      new Notice("找不到对应章节");
+      return;
+    }
+    await this.gotoChapter(idx, bm.scrollPercent);
+  }
+
+  // ---------- Progress estimate ----------
+  /** 计算章节字数缓存,首次打开时算一次 */
+  ensureChapterChars() {
+    if (!this.data || !this.book) return;
+    if (
+      this.data.chapterChars &&
+      this.data.chapterChars.length === this.book.chapters.length
+    )
+      return;
+    const counts: number[] = [];
+    let total = 0;
+    for (const ch of this.book.chapters) {
+      const text = ch.html.replace(/<[^>]+>/g, "");
+      const n = text.length;
+      counts.push(n);
+      total += n;
+    }
+    this.data.chapterChars = counts;
+    this.data.totalChars = total;
+  }
+
+  /** 整本进度 0..1 */
+  overallProgress(): number {
+    if (!this.data || !this.book) return 0;
+    this.ensureChapterChars();
+    if (!this.data.chapterChars || !this.data.totalChars) return 0;
+    let charsRead = 0;
+    for (let i = 0; i < this.chapterIndex; i++) {
+      charsRead += this.data.chapterChars[i] || 0;
+    }
+    const cur = this.data.chapterChars[this.chapterIndex] || 0;
+    charsRead += cur * this.scrollPercent();
+    return Math.min(1, charsRead / this.data.totalChars);
+  }
+
+  /** 估算剩余时间秒数 */
+  estimateRemainingSeconds(): number | null {
+    if (!this.data) return null;
+    const progress = this.overallProgress();
+    if (progress <= 0.02) return null; // 数据不够
+    const seconds = this.data.readingSeconds || 0;
+    if (seconds < 60) return null;
+    const charsRead = (this.data.totalChars || 0) * progress;
+    if (charsRead < 500) return null;
+    const speed = charsRead / seconds; // chars / sec
+    const remainingChars = (this.data.totalChars || 0) - charsRead;
+    return remainingChars / speed;
   }
 
   /** gotoChapter 之后若有 pendingSearchQuery,在新章节里找首个匹配并滚到它,临时高亮 */

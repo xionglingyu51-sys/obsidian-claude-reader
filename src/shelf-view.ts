@@ -51,14 +51,16 @@ export class BookshelfView extends ItemView {
 
     const books = this.app.vault
       .getFiles()
-      .filter((f) => f.extension === "epub")
+      .filter((f) =>
+        ["epub", "mobi", "azw3", "txt"].includes(f.extension.toLowerCase())
+      )
       .sort((a, b) => b.stat.mtime - a.stat.mtime);
 
     const grid = this.rootEl.createDiv({ cls: "cr-shelf-grid" });
     if (books.length === 0) {
       grid.createDiv({
         cls: "cr-shelf-empty",
-        text: "vault 里没有 EPUB。把 .epub 拖进任意文件夹即可。",
+        text: "vault 里没有 EPUB / MOBI / TXT。把书拖进任意文件夹即可。",
       });
       return;
     }

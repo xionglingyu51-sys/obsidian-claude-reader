@@ -154,10 +154,13 @@ export class NotesPanelView extends ItemView {
   }
 
   async refresh() {
-    const epubs = this.app.vault.getFiles().filter((f) => f.extension === "epub");
+    const books = this.app.vault
+      .getFiles()
+      .filter((f) =>
+        ["epub", "mobi", "azw3", "txt"].includes(f.extension.toLowerCase())
+      );
     const all: { data: BookData; bookFile?: TFile }[] = [];
-    for (const f of epubs) {
-      // 找已存在的 sidecar
+    for (const f of books) {
       const key = await (await import("./storage")).bookKeyFor(f);
       const data = await this.plugin.storage.load(key);
       if (data && data.highlights.length > 0) {

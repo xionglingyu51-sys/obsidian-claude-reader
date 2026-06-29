@@ -96,11 +96,24 @@ export interface BookProgress {
   scrollPercent: number;
 }
 
+export interface Bookmark {
+  id: string;
+  chapterId: string;
+  chapterTitle?: string;
+  scrollPercent: number;
+  label: string;
+  snippet?: string;
+  createdAt: number;
+}
+
 export interface BookData {
   bookKey: string; // sha-like, from filename + size
   title: string;
   highlights: Highlight[];
+  bookmarks?: Bookmark[];
   progress: BookProgress | null;
   lastOpenedAt: number;
   readingSeconds: number;
+  totalChars?: number;
+  chapterChars?: number[];
 }

@@ -69,8 +69,8 @@ export default class ClaudeReaderPlugin extends Plugin {
       (leaf) => new NotesPanelView(leaf, this)
     );
 
-    // 接管 epub 文件打开
-    this.registerExtensions(["epub"], VIEW_TYPE_READER);
+    // 接管 epub/mobi/azw3/txt 文件打开
+    this.registerExtensions(["epub", "mobi", "azw3", "txt"], VIEW_TYPE_READER);
 
     this.addRibbonIcon("library", "Claude Reader 书架", () =>
       this.activateShelf()
@@ -154,12 +154,14 @@ export default class ClaudeReaderPlugin extends Plugin {
   /** obsidian://claude-reader-jump 协议: 找到书的 sidecar -> 找 annotation -> 打开 reader -> 跳章节 -> 滚到附近 */
   async jumpToAnnotation(bookKey: string, annId: string) {
     if (!bookKey || !annId) return;
-    // 通过遍历 vault 里的 epub 找到对应 bookKey
-    const epubs = this.app.vault
+    // 通过遍历 vault 里的所有书找到对应 bookKey
+    const books = this.app.vault
       .getFiles()
-      .filter((f) => f.extension === "epub");
+      .filter((f) =>
+        ["epub", "mobi", "azw3", "txt"].includes(f.extension.toLowerCase())
+      );
     let target: TFile | null = null;
-    for (const f of epubs) {
+    for (const f of books) {
       const k = await bookKeyFor(f);
       if (k === bookKey) {
         target = f;
