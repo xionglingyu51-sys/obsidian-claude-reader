@@ -368,11 +368,37 @@ export class ReaderView extends ItemView {
 
     const tb = document.body.createDiv({ cls: "cr-toolbar" });
 
-    // 阻止点工具条本身导致选区被清掉
-    tb.addEventListener("mousedown", (e) => e.preventDefault());
-    tb.addEventListener("touchstart", (e) => e.preventDefault(), {
-      passive: false,
+    // 工具条空白处吸住 pointer,但不再阻止按钮内的 click
+    tb.addEventListener("pointerdown", (e) => {
+      // 只在点的是工具条本身(空白)时阻止默认
+      if (e.target === tb) e.preventDefault();
     });
+
+    /**
+     * iOS 上 long-press 后点按钮时,touchstart→click 链路在工具条祖先
+     * preventDefault 后会断掉。改用 pointerdown 触发动作,绕过 click。
+     */
+    const onPress = (
+      btn: HTMLElement,
+      handler: () => void
+    ) => {
+      btn.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        // pointerup 之后再触发,这样手感更接近原生 tap
+        const onUp = () => {
+          btn.removeEventListener("pointerup", onUp);
+          btn.removeEventListener("pointerleave", onCancel);
+          handler();
+        };
+        const onCancel = () => {
+          btn.removeEventListener("pointerup", onUp);
+          btn.removeEventListener("pointerleave", onCancel);
+        };
+        btn.addEventListener("pointerup", onUp);
+        btn.addEventListener("pointerleave", onCancel);
+      });
+    };
 
     // 4 color dots
     for (const c of Object.keys(COLORS) as HighlightColor[]) {
@@ -381,48 +407,44 @@ export class ReaderView extends ItemView {
         attr: { "aria-label": `${COLORS[c].label} - ${COLORS[c].meaning}` },
       });
       dot.style.background = COLORS[c].fill;
-      dot.onclick = (e) => {
-        e.stopPropagation();
+      onPress(dot, () => {
         this.addHighlight(savedRange.cloneRange(), c);
         window.getSelection()?.removeAllRanges();
         this.removeToolbar();
-      };
+      });
     }
 
     // AI button
     const ai = tb.createEl("button", { cls: "cr-tb-btn cr-tb-ai" });
     ai.setText("AI");
     ai.setAttr("aria-label", "问 Claude");
-    ai.onclick = (e) => {
-      e.stopPropagation();
+    onPress(ai, () => {
       this.askClaudeAbout(selectedText);
       window.getSelection()?.removeAllRanges();
       this.removeToolbar();
-    };
+    });
 
     // 快捷 prompt 模板按钮
     for (const tpl of this.plugin.settings.templates) {
       const btn = tb.createEl("button", { cls: "cr-tb-btn cr-tb-tpl" });
       btn.setText(tpl.label);
       btn.setAttr("aria-label", tpl.prompt);
-      btn.onclick = (e) => {
-        e.stopPropagation();
+      onPress(btn, () => {
         this.askClaudeWithTemplate(selectedText, tpl.prompt);
         window.getSelection()?.removeAllRanges();
         this.removeToolbar();
-      };
+      });
     }
 
     // copy
     const copy = tb.createEl("button", { cls: "cr-tb-btn" });
     setIcon(copy, "copy");
     copy.setAttr("aria-label", "复制");
-    copy.onclick = (e) => {
-      e.stopPropagation();
-      navigator.clipboard.writeText(selectedText);
+    onPress(copy, () => {
+      this.copyToClipboard(selectedText);
       window.getSelection()?.removeAllRanges();
       this.removeToolbar();
-    };
+    });
 
     // position
     const top = rect.top - 44 < 8 ? rect.bottom + 8 : rect.top - 44;
@@ -439,10 +461,8 @@ export class ReaderView extends ItemView {
     this.outsideClickHandler = (e: Event) => {
       const target = e.target as Node;
       if (tb.contains(target)) return;
-      // 如果用户点在 chapter 区域内并产生了新选区,onSelectionChange 会重开
       this.removeToolbar();
     };
-    // 用 setTimeout 避免立刻被同一次点击关掉
     window.setTimeout(() => {
       if (this.outsideClickHandler) {
         document.addEventListener(
@@ -452,6 +472,30 @@ export class ReaderView extends ItemView {
         );
       }
     }, 50);
+  }
+
+  /** Clipboard 兜底: navigator.clipboard 在 iOS Obsidian 里偶尔失败,用 textarea 备份 */
+  async copyToClipboard(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      new Notice("已复制");
+      return;
+    } catch {
+      // fallthrough to textarea
+    }
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+      new Notice("已复制");
+    } catch (e) {
+      new Notice("复制失败: " + (e as Error).message);
+    }
   }
 
   async addHighlight(range: Range, color: HighlightColor) {
@@ -485,19 +529,38 @@ export class ReaderView extends ItemView {
     const rect = target.getBoundingClientRect();
     this.removeToolbar();
     const tb = document.body.createDiv({ cls: "cr-toolbar cr-toolbar-hl" });
-    tb.addEventListener("mousedown", (e) => e.preventDefault());
-    tb.addEventListener("touchstart", (e) => e.preventDefault(), {
-      passive: false,
+
+    tb.addEventListener("pointerdown", (e) => {
+      if (e.target === tb) e.preventDefault();
     });
+    const onPress = (
+      btn: HTMLElement,
+      handler: () => void
+    ) => {
+      btn.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const onUp = () => {
+          btn.removeEventListener("pointerup", onUp);
+          btn.removeEventListener("pointerleave", onCancel);
+          handler();
+        };
+        const onCancel = () => {
+          btn.removeEventListener("pointerup", onUp);
+          btn.removeEventListener("pointerleave", onCancel);
+        };
+        btn.addEventListener("pointerup", onUp);
+        btn.addEventListener("pointerleave", onCancel);
+      });
+    };
+
     for (const c of Object.keys(COLORS) as HighlightColor[]) {
       const dot = tb.createEl("button", {
         cls: `cr-tb-dot cr-tb-dot-${c}` + (c === h.color ? " active" : ""),
       });
       dot.style.background = COLORS[c].fill;
-      dot.onclick = async (e) => {
-        e.stopPropagation();
+      onPress(dot, async () => {
         h.color = c;
-        // 重新渲染章节以反映新颜色
         await this.plugin.storage.upsertHighlight(
           this.data!.bookKey,
           h,
@@ -505,31 +568,44 @@ export class ReaderView extends ItemView {
         );
         await this.gotoChapter(this.chapterIndex, this.scrollPercent());
         this.removeToolbar();
-      };
+      });
     }
     const ai = tb.createEl("button", { cls: "cr-tb-btn cr-tb-ai" });
     ai.setText("AI");
-    ai.onclick = (e) => {
-      e.stopPropagation();
+    onPress(ai, () => {
       this.askClaudeAbout(h.text);
       this.removeToolbar();
-    };
+    });
     const del = tb.createEl("button", { cls: "cr-tb-btn" });
     setIcon(del, "trash-2");
-    del.onclick = async (e) => {
-      e.stopPropagation();
+    onPress(del, async () => {
       await this.plugin.storage.deleteHighlight(this.data!.bookKey, h.id);
       this.data!.highlights = this.data!.highlights.filter(
         (x) => x.id !== h.id
       );
       await this.gotoChapter(this.chapterIndex, this.scrollPercent());
       this.removeToolbar();
-    };
+    });
     const top = rect.top - 44 < 8 ? rect.bottom + 8 : rect.top - 44;
     const left = Math.max(8, Math.min(rect.left, window.innerWidth - 240));
     tb.style.top = `${top}px`;
     tb.style.left = `${left}px`;
     this.toolbarEl = tb;
+
+    this.outsideClickHandler = (e: Event) => {
+      const target = e.target as Node;
+      if (tb.contains(target)) return;
+      this.removeToolbar();
+    };
+    window.setTimeout(() => {
+      if (this.outsideClickHandler) {
+        document.addEventListener(
+          "pointerdown",
+          this.outsideClickHandler,
+          true
+        );
+      }
+    }, 50);
   }
 
   scrollPercent(): number {
