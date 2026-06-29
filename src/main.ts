@@ -1,5 +1,6 @@
 import {
   App,
+  Notice,
   Plugin,
   PluginSettingTab,
   Setting,
@@ -66,6 +67,24 @@ export default class ClaudeReaderPlugin extends Plugin {
     this.addRibbonIcon("library", "Claude Reader 书架", () =>
       this.activateShelf()
     );
+
+    this.addCommand({
+      id: "ask-selection",
+      name: "用选中文字问 Claude",
+      callback: () => {
+        const sel = window.getSelection();
+        const text = sel?.toString().trim();
+        if (!text) {
+          new Notice("先选中一段文字");
+          return;
+        }
+        this.askWithContext({
+          bookTitle: "",
+          chapterTitle: "",
+          selection: text,
+        });
+      },
+    });
 
     this.addCommand({
       id: "open-shelf",

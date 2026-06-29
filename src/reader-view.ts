@@ -106,6 +106,12 @@ export class ReaderView extends ItemView {
     const titleEl = header.createDiv({ cls: "cr-title" });
     titleEl.setText(this.book?.title ?? "未打开书籍");
 
+    // 兜底: 顶栏 AI 按钮 — 选中任意文字后,点这里直接发到 chat
+    const askBtn = header.createEl("button", { cls: "cr-icon-btn" });
+    askBtn.setText("AI");
+    askBtn.setAttr("aria-label", "问选区");
+    askBtn.onclick = () => this.askFromCurrentSelection();
+
     const themeBtn = header.createEl("button", { cls: "cr-icon-btn" });
     setIcon(themeBtn, "palette");
     themeBtn.setAttr("aria-label", "主题");
@@ -139,13 +145,16 @@ export class ReaderView extends ItemView {
 
     // selection 监听 (桌面 + iOS 都覆盖)
     this.registerDomEvent(document, "selectionchange", () =>
-      this.scheduleSelectionCheck()
+      this.scheduleSelectionCheck(200)
     );
     this.registerDomEvent(this.contentEl_, "mouseup", () =>
-      this.scheduleSelectionCheck(80)
+      this.scheduleSelectionCheck(150)
     );
     this.registerDomEvent(this.contentEl_, "touchend", () =>
-      this.scheduleSelectionCheck(120)
+      this.scheduleSelectionCheck(300)
+    );
+    this.registerDomEvent(this.contentEl_, "pointerup", () =>
+      this.scheduleSelectionCheck(300)
     );
 
     // scroll progress
@@ -300,14 +309,37 @@ export class ReaderView extends ItemView {
     }, delay);
   }
 
+  /**
+   * 兜底入口: 顶栏 AI 按钮触发,直接从当前 selection 抓文字发到 chat。
+   * 即使工具条因为各种原因没出现,这里也能用。
+   */
+  askFromCurrentSelection() {
+    const sel = window.getSelection();
+    let text = sel?.toString().trim() || "";
+    if (!text) {
+      // 兼容 iOS: 有时 selection 在 iframe 内但 window.getSelection 拿不到
+      // 退化方案: 弹 prompt 让用户粘贴
+      const pasted = window.prompt(
+        "在书里选中文字后,系统会自动用它。\n如果系统没抓到,请把要问的文字粘到这里:"
+      );
+      if (!pasted) return;
+      text = pasted.trim();
+    }
+    if (!text) return;
+    new Notice(`正在问 Claude:「${text.slice(0, 40)}...」`);
+    this.askClaudeAbout(text);
+  }
+
   onSelectionChange() {
     const sel = window.getSelection();
     // 工具条已经存在时,不因为选区变化而关闭——靠 outside click 关闭
     if (this.toolbarEl) return;
     if (!sel || sel.isCollapsed) return;
+    if (sel.rangeCount === 0) return;
     const range = sel.getRangeAt(0);
     if (!this.chapterRootEl.contains(range.commonAncestorContainer)) return;
-    if (!sel.toString().trim()) return;
+    const text = sel.toString().trim();
+    if (!text) return;
     const rect = range.getBoundingClientRect();
     if (rect.width === 0 && rect.height === 0) return;
     this.showToolbar(rect, range);
