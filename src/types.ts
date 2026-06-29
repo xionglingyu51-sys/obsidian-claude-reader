@@ -1,7 +1,55 @@
-export interface Highlight {
+export type HighlightStyle = "fill" | "underline" | "wavy";
+export type NoteType = "insight" | "question" | "reminder";
+
+export const STYLES: { id: HighlightStyle; label: string }[] = [
+  { id: "fill", label: "填充" },
+  { id: "underline", label: "下划线" },
+  { id: "wavy", label: "波浪线" },
+];
+
+export const NOTE_TYPES: { value: NoteType; label: string; emoji: string }[] = [
+  { value: "insight", label: "洞见", emoji: "💡" },
+  { value: "question", label: "疑问", emoji: "❓" },
+  { value: "reminder", label: "提醒", emoji: "🔔" },
+];
+
+/**
+ * 两类标记:
+ * - highlight: 单纯划线,无笔记
+ * - note: 带笔记的想法,必然含 note 文字 + noteType
+ *
+ * 共享: 锚点 (path + offset)、color、style、text
+ */
+export interface BaseAnnotation {
   id: string;
   chapterId: string;
-  // 选区定位用 path + offset (XPath-ish)
+  startPath: number[];
+  startOffset: number;
+  endPath: number[];
+  endOffset: number;
+  text: string;
+  color: HighlightColor;
+  style: HighlightStyle;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface HighlightAnnotation extends BaseAnnotation {
+  kind: "highlight";
+}
+
+export interface NoteAnnotation extends BaseAnnotation {
+  kind: "note";
+  note: string;
+  noteType: NoteType;
+}
+
+export type Annotation = HighlightAnnotation | NoteAnnotation;
+
+/** 兼容旧版数据 */
+export interface LegacyHighlight {
+  id: string;
+  chapterId: string;
   startPath: number[];
   startOffset: number;
   endPath: number[];
@@ -11,6 +59,8 @@ export interface Highlight {
   note?: string;
   createdAt: number;
 }
+
+export type Highlight = Annotation;
 
 export type HighlightColor = "yellow" | "green" | "pink" | "blue";
 

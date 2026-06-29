@@ -11,6 +11,7 @@ import { BookStorage } from "./storage";
 import { ReaderView, VIEW_TYPE_READER } from "./reader-view";
 import { ChatView, VIEW_TYPE_CHAT, AskContext } from "./chat-view";
 import { BookshelfView, VIEW_TYPE_SHELF } from "./shelf-view";
+import { NotesPanelView, VIEW_TYPE_NOTES } from "./notes-panel";
 
 interface PromptTemplate {
   label: string;
@@ -60,12 +61,19 @@ export default class ClaudeReaderPlugin extends Plugin {
       VIEW_TYPE_SHELF,
       (leaf) => new BookshelfView(leaf, this)
     );
+    this.registerView(
+      VIEW_TYPE_NOTES,
+      (leaf) => new NotesPanelView(leaf, this)
+    );
 
     // 接管 epub 文件打开
     this.registerExtensions(["epub"], VIEW_TYPE_READER);
 
     this.addRibbonIcon("library", "Claude Reader 书架", () =>
       this.activateShelf()
+    );
+    this.addRibbonIcon("sticky-note", "Claude Reader 笔记", () =>
+      this.activateNotes()
     );
 
     this.addCommand({
@@ -90,6 +98,11 @@ export default class ClaudeReaderPlugin extends Plugin {
       id: "open-shelf",
       name: "打开 Claude Reader 书架",
       callback: () => this.activateShelf(),
+    });
+    this.addCommand({
+      id: "open-notes",
+      name: "打开笔记面板",
+      callback: () => this.activateNotes(),
     });
     this.addCommand({
       id: "open-chat",
@@ -131,6 +144,19 @@ export default class ClaudeReaderPlugin extends Plugin {
     const leaf = this.app.workspace.getLeaf(true);
     await leaf.setViewState({ type: VIEW_TYPE_SHELF, active: true });
     this.app.workspace.revealLeaf(leaf);
+  }
+
+  async activateNotes() {
+    const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_NOTES);
+    if (existing.length) {
+      this.app.workspace.revealLeaf(existing[0]);
+      return;
+    }
+    const leaf = this.app.workspace.getRightLeaf(false);
+    if (leaf) {
+      await leaf.setViewState({ type: VIEW_TYPE_NOTES, active: true });
+      this.app.workspace.revealLeaf(leaf);
+    }
   }
 
   async activateChat(): Promise<ChatView | null> {

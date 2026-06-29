@@ -84,10 +84,13 @@ function wrapRangeWithSpans(
     if (!parent) continue;
 
     const span = document.createElement("span");
-    span.className = `cr-hl cr-hl-${h.color}`;
-    if (h.note) span.classList.add("cr-hl-has-note");
+    const styleCls = `cr-hl-style-${h.style ?? "fill"}`;
+    span.className = `cr-hl cr-hl-${h.color} ${styleCls}`;
+    if (h.kind === "note") {
+      span.classList.add("cr-hl-has-note");
+      span.title = h.note;
+    }
     span.dataset.hlId = h.id;
-    if (h.note) span.title = h.note;
     span.textContent = middle;
     span.addEventListener("click", (e) => {
       e.stopPropagation();

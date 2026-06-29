@@ -6,6 +6,10 @@ import {
   COLORS,
   Highlight,
   HighlightColor,
+  HighlightStyle,
+  NOTE_TYPES,
+  NoteType,
+  STYLES,
 } from "./types";
 import { applyHighlight, highlightFromRange } from "./highlight";
 import { bookKeyFor } from "./storage";
@@ -528,17 +532,21 @@ export class ReaderView extends ItemView {
     const info = highlightFromRange(range, this.chapterRootEl);
     if (!info) return null;
 
+    const now = Date.now();
     const h: Highlight = {
-      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      id: now.toString(36) + Math.random().toString(36).slice(2, 6),
+      kind: "highlight",
       chapterId: ch.id,
       ...info,
       color,
-      createdAt: Date.now(),
+      style: "fill",
+      createdAt: now,
+      updatedAt: now,
     };
     applyHighlight(this.chapterRootEl, h, (hh, el) =>
       this.onHighlightClick(hh, el)
     );
-    await this.plugin.storage.upsertHighlight(
+    await this.plugin.storage.upsertAnnotation(
       this.data.bookKey,
       h,
       this.data.title
@@ -668,19 +676,51 @@ export class ReaderView extends ItemView {
   }
 
   openNoteModal(h: Highlight) {
-    new NoteModal(this.app, h, async (newNote) => {
-      if (!this.data) return;
-      h.note = newNote.trim() || undefined;
-      await this.plugin.storage.upsertHighlight(
-        this.data.bookKey,
-        h,
-        this.data.title
-      );
-      // 更新内存里的引用
-      const idx = this.data.highlights.findIndex((x) => x.id === h.id);
-      if (idx >= 0) this.data.highlights[idx] = h;
-      await this.gotoChapter(this.chapterIndex, this.scrollPercent());
-    }).open();
+    new NoteModal(
+      this.app,
+      {
+        text: h.text,
+        note: h.kind === "note" ? h.note : "",
+        color: h.color,
+        style: h.style,
+        noteType: h.kind === "note" ? h.noteType : "insight",
+      },
+      async (result) => {
+        if (!this.data) return;
+        const next: Highlight = result.note.trim()
+          ? {
+              ...h,
+              kind: "note",
+              note: result.note.trim(),
+              noteType: result.noteType,
+              color: result.color,
+              style: result.style,
+              updatedAt: Date.now(),
+            }
+          : {
+              ...h,
+              kind: "highlight",
+              color: result.color,
+              style: result.style,
+              updatedAt: Date.now(),
+            };
+        // 删除可能多余的字段
+        if (next.kind === "highlight") {
+          // @ts-expect-error 清理旧的 note 字段
+          delete (next as any).note;
+          // @ts-expect-error
+          delete (next as any).noteType;
+        }
+        await this.plugin.storage.upsertAnnotation(
+          this.data.bookKey,
+          next,
+          this.data.title
+        );
+        const idx = this.data.highlights.findIndex((x) => x.id === h.id);
+        if (idx >= 0) this.data.highlights[idx] = next;
+        await this.gotoChapter(this.chapterIndex, this.scrollPercent());
+      }
+    ).open();
   }
 
   // ---------- Theme ----------
@@ -810,16 +850,38 @@ export class ReaderView extends ItemView {
 }
 
 class NoteModal extends Modal {
-  highlight: Highlight;
-  onSave: (note: string) => void;
+  initial: {
+    text: string;
+    note: string;
+    color: HighlightColor;
+    style: HighlightStyle;
+    noteType: NoteType;
+  };
+  onSave: (result: {
+    note: string;
+    color: HighlightColor;
+    style: HighlightStyle;
+    noteType: NoteType;
+  }) => void;
 
   constructor(
     app: App,
-    highlight: Highlight,
-    onSave: (note: string) => void
+    initial: {
+      text: string;
+      note: string;
+      color: HighlightColor;
+      style: HighlightStyle;
+      noteType: NoteType;
+    },
+    onSave: (result: {
+      note: string;
+      color: HighlightColor;
+      style: HighlightStyle;
+      noteType: NoteType;
+    }) => void
   ) {
     super(app);
-    this.highlight = highlight;
+    this.initial = initial;
     this.onSave = onSave;
   }
 
@@ -828,20 +890,85 @@ class NoteModal extends Modal {
     contentEl.empty();
     contentEl.addClass("cr-note-modal");
 
-    contentEl.createEl("h3", { text: "笔记", cls: "cr-note-modal-title" });
-
-    const quote = contentEl.createDiv({ cls: "cr-note-modal-quote" });
-    quote.setText(this.highlight.text);
-
-    const textarea = contentEl.createEl("textarea", {
-      cls: "cr-note-modal-input",
-      attr: {
-        placeholder: "写点什么...",
-        rows: "6",
-      },
+    contentEl.createEl("h3", {
+      text: "写下你的想法",
+      cls: "cr-note-modal-title",
     });
-    textarea.value = this.highlight.note || "";
 
+    // 原文引用 (截断 240)
+    const txt = this.initial.text;
+    const quote = contentEl.createDiv({ cls: "cr-note-modal-quote" });
+    quote.setText(txt.length > 240 ? txt.slice(0, 240) + "…" : txt);
+
+    let color = this.initial.color;
+    let style = this.initial.style;
+    let noteType = this.initial.noteType;
+
+    // 颜色行
+    const colorRow = contentEl.createDiv({ cls: "cr-note-row" });
+    colorRow.createEl("span", { cls: "cr-note-label", text: "画线颜色" });
+    const colorBox = colorRow.createDiv({ cls: "cr-note-color-box" });
+    const colorEls: Record<string, HTMLElement> = {};
+    for (const c of Object.keys(COLORS) as HighlightColor[]) {
+      const dot = colorBox.createDiv({
+        cls: "cr-note-color-dot" + (c === color ? " active" : ""),
+      });
+      dot.style.background = COLORS[c].fill;
+      dot.title = COLORS[c].label;
+      dot.onclick = () => {
+        color = c;
+        Object.values(colorEls).forEach((d) =>
+          d.removeClass("active")
+        );
+        dot.addClass("active");
+      };
+      colorEls[c] = dot;
+    }
+
+    // 样式行
+    const styleRow = contentEl.createDiv({ cls: "cr-note-row" });
+    styleRow.createEl("span", { cls: "cr-note-label", text: "标注样式" });
+    const styleBox = styleRow.createDiv({ cls: "cr-note-chips" });
+    const styleEls: Record<string, HTMLElement> = {};
+    for (const s of STYLES) {
+      const chip = styleBox.createDiv({
+        cls: "cr-note-chip" + (s.id === style ? " active" : ""),
+        text: s.label,
+      });
+      chip.onclick = () => {
+        style = s.id;
+        Object.values(styleEls).forEach((d) => d.removeClass("active"));
+        chip.addClass("active");
+      };
+      styleEls[s.id] = chip;
+    }
+
+    // 想法类型行
+    const typeRow = contentEl.createDiv({ cls: "cr-note-row" });
+    typeRow.createEl("span", { cls: "cr-note-label", text: "想法类型" });
+    const typeBox = typeRow.createDiv({ cls: "cr-note-chips" });
+    const typeEls: Record<string, HTMLElement> = {};
+    for (const t of NOTE_TYPES) {
+      const chip = typeBox.createDiv({
+        cls: "cr-note-chip" + (t.value === noteType ? " active" : ""),
+        text: `${t.emoji} ${t.label}`,
+      });
+      chip.onclick = () => {
+        noteType = t.value;
+        Object.values(typeEls).forEach((d) => d.removeClass("active"));
+        chip.addClass("active");
+      };
+      typeEls[t.value] = chip;
+    }
+
+    // 文本框
+    const ta = contentEl.createEl("textarea", {
+      cls: "cr-note-modal-input",
+      attr: { placeholder: "在这里写下你的想法、疑问或联想…", rows: "6" },
+    });
+    ta.value = this.initial.note;
+
+    // 按钮
     const actions = contentEl.createDiv({ cls: "cr-note-modal-actions" });
     const cancel = actions.createEl("button", {
       text: "取消",
@@ -850,23 +977,27 @@ class NoteModal extends Modal {
     cancel.onclick = () => this.close();
     const save = actions.createEl("button", {
       text: "保存",
-      cls: "cr-note-modal-btn cr-note-modal-save",
+      cls: "cr-note-modal-btn cr-note-modal-save mod-cta",
     });
     save.onclick = () => {
-      this.onSave(textarea.value);
+      this.onSave({ note: ta.value, color, style, noteType });
       this.close();
     };
 
-    // Cmd/Ctrl+Enter 保存
-    textarea.addEventListener("keydown", (e) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+    // 快捷键
+    ta.addEventListener("keydown", (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
         e.preventDefault();
-        this.onSave(textarea.value);
+        this.onSave({ note: ta.value, color, style, noteType });
+        this.close();
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
         this.close();
       }
     });
 
-    window.setTimeout(() => textarea.focus(), 50);
+    window.setTimeout(() => ta.focus(), 50);
   }
 
   onClose() {
