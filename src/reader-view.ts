@@ -137,9 +137,15 @@ export class ReaderView extends ItemView {
 
     this.navIndicatorEl = indicator;
 
-    // selection监听
+    // selection 监听 (桌面 + iOS 都覆盖)
     this.registerDomEvent(document, "selectionchange", () =>
-      this.onSelectionChange()
+      this.scheduleSelectionCheck()
+    );
+    this.registerDomEvent(this.contentEl_, "mouseup", () =>
+      this.scheduleSelectionCheck(80)
+    );
+    this.registerDomEvent(this.contentEl_, "touchend", () =>
+      this.scheduleSelectionCheck(120)
     );
 
     // scroll progress
@@ -283,6 +289,15 @@ export class ReaderView extends ItemView {
   }
 
   // ---------- Selection toolbar ----------
+  selectionCheckTimer: number | null = null;
+  scheduleSelectionCheck(delay = 0) {
+    if (this.selectionCheckTimer) window.clearTimeout(this.selectionCheckTimer);
+    this.selectionCheckTimer = window.setTimeout(() => {
+      this.selectionCheckTimer = null;
+      this.onSelectionChange();
+    }, delay);
+  }
+
   onSelectionChange() {
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed) {
@@ -325,6 +340,12 @@ export class ReaderView extends ItemView {
   showToolbar(rect: DOMRect, range: Range) {
     this.removeToolbar();
     const tb = document.body.createDiv({ cls: "cr-toolbar" });
+
+    // 阻止点工具条本身导致选区被清掉
+    tb.addEventListener("mousedown", (e) => e.preventDefault());
+    tb.addEventListener("touchstart", (e) => e.preventDefault(), {
+      passive: false,
+    });
 
     // 4 color dots
     for (const c of Object.keys(COLORS) as HighlightColor[]) {
@@ -406,6 +427,10 @@ export class ReaderView extends ItemView {
     const rect = target.getBoundingClientRect();
     this.removeToolbar();
     const tb = document.body.createDiv({ cls: "cr-toolbar cr-toolbar-hl" });
+    tb.addEventListener("mousedown", (e) => e.preventDefault());
+    tb.addEventListener("touchstart", (e) => e.preventDefault(), {
+      passive: false,
+    });
     for (const c of Object.keys(COLORS) as HighlightColor[]) {
       const dot = tb.createEl("button", {
         cls: `cr-tb-dot cr-tb-dot-${c}` + (c === h.color ? " active" : ""),

@@ -118,6 +118,13 @@
   font-size: 17px;
   line-height: 1.75;
   font-family: var(--font-text, var(--font-interface));
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+.cr-chapter * {
+  -webkit-user-select: text;
+  user-select: text;
 }
 .cr-chapter p {
   margin: 0.7em 0;
@@ -223,7 +230,7 @@
 /* ---------- Selection toolbar ---------- */
 .cr-toolbar {
   position: fixed;
-  z-index: 1000;
+  z-index: 9999;
   display: flex;
   align-items: center;
   gap: 4px;
