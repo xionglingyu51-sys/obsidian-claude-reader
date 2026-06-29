@@ -130,18 +130,12 @@ export class ReaderView extends ItemView {
       }
     });
 
-    // nav buttons
-    const nav = this.rootEl.createDiv({ cls: "cr-nav" });
-    const prev = nav.createEl("button", { cls: "cr-nav-btn" });
-    setIcon(prev, "chevron-left");
-    prev.onclick = () => this.gotoChapter(this.chapterIndex - 1);
-    const indicator = nav.createDiv({ cls: "cr-nav-indicator" });
-    indicator.setText("--");
-    const next = nav.createEl("button", { cls: "cr-nav-btn" });
-    setIcon(next, "chevron-right");
-    next.onclick = () => this.gotoChapter(this.chapterIndex + 1);
+    // 浮动章节进度指示器
+    this.navIndicatorEl = this.rootEl.createDiv({ cls: "cr-progress-pill" });
+    this.navIndicatorEl.setText("--");
 
-    this.navIndicatorEl = indicator;
+    // 点滑翻页: 触摸滑动 + 桌面滚轮章节切换
+    this.registerSwipeNav();
 
     // selection 监听 (桌面 + iOS 都覆盖)
     this.registerDomEvent(document, "selectionchange", () =>
@@ -277,7 +271,16 @@ export class ReaderView extends ItemView {
     this.navIndicatorEl.setText(
       `${this.chapterIndex + 1} / ${this.book.chapters.length}`
     );
+    // 切换章节时短暂高亮提示
+    this.navIndicatorEl.addClass("show");
+    if (this.indicatorTimer) window.clearTimeout(this.indicatorTimer);
+    this.indicatorTimer = window.setTimeout(() => {
+      this.navIndicatorEl.removeClass("show");
+      this.indicatorTimer = null;
+    }, 1600);
   }
+
+  indicatorTimer: number | null = null;
 
   scrollSaveTimer: number | null = null;
   onScroll() {
@@ -644,5 +647,75 @@ export class ReaderView extends ItemView {
       if (t) this.rootEl.toggleClass(t, false);
     }
     if (next) this.rootEl.toggleClass(next, true);
+  }
+
+  // ---------- Swipe nav ----------
+  registerSwipeNav() {
+    let startX = 0;
+    let startY = 0;
+    let startT = 0;
+    let active = false;
+    let hadSelection = false;
+
+    this.registerDomEvent(this.contentEl_, "touchstart", (e: TouchEvent) => {
+      if (e.touches.length !== 1) return;
+      // 如果有选区,不触发 swipe (避免选字时被翻页)
+      const sel = window.getSelection();
+      hadSelection = !!(sel && !sel.isCollapsed && sel.toString().length > 0);
+      if (hadSelection) return;
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      startT = Date.now();
+      active = true;
+    });
+
+    this.registerDomEvent(this.contentEl_, "touchend", (e: TouchEvent) => {
+      if (!active) return;
+      active = false;
+      const t = e.changedTouches[0];
+      const dx = t.clientX - startX;
+      const dy = t.clientY - startY;
+      const dt = Date.now() - startT;
+      // 阈值: 横向 60px+, 纵向偏离 < 80px, 时间 < 600ms
+      if (Math.abs(dx) < 60) return;
+      if (Math.abs(dy) > 80) return;
+      if (dt > 600) return;
+      if (dx < 0) {
+        // 左滑 → 下一章
+        this.gotoChapter(this.chapterIndex + 1);
+      } else {
+        // 右滑 → 上一章
+        this.gotoChapter(this.chapterIndex - 1);
+      }
+    });
+
+    // 桌面: 在章节顶/底时滚轮再滚就翻章
+    let wheelLock = false;
+    this.registerDomEvent(this.contentEl_, "wheel", (e: WheelEvent) => {
+      if (wheelLock) return;
+      const atTop = this.contentEl_.scrollTop <= 0;
+      const atBottom =
+        this.contentEl_.scrollTop + this.contentEl_.clientHeight >=
+        this.contentEl_.scrollHeight - 2;
+      if (e.deltaY > 30 && atBottom) {
+        wheelLock = true;
+        this.gotoChapter(this.chapterIndex + 1);
+        window.setTimeout(() => (wheelLock = false), 500);
+      } else if (e.deltaY < -30 && atTop) {
+        wheelLock = true;
+        this.gotoChapter(this.chapterIndex - 1);
+        window.setTimeout(() => (wheelLock = false), 500);
+      }
+    });
+
+    // 键盘 (桌面 Obsidian)
+    this.registerDomEvent(window, "keydown", (e: KeyboardEvent) => {
+      // 仅当 reader 是 active 时响应
+      if (!this.rootEl.isShown()) return;
+      if (e.target instanceof HTMLInputElement) return;
+      if (e.target instanceof HTMLTextAreaElement) return;
+      if (e.key === "ArrowLeft") this.gotoChapter(this.chapterIndex - 1);
+      if (e.key === "ArrowRight") this.gotoChapter(this.chapterIndex + 1);
+    });
   }
 }
