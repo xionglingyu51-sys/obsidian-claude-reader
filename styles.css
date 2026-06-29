@@ -115,6 +115,9 @@
   background: var(--cr-bg);
   color: var(--cr-fg);
   -webkit-overflow-scrolling: touch;
+  /* 阻止系统横向滑出侧边栏 */
+  touch-action: pan-y;
+  overscroll-behavior-x: contain;
 }
 .cr-chapter {
   max-width: 720px;
