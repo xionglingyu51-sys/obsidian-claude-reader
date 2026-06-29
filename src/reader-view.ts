@@ -1,4 +1,4 @@
-import { ItemView, Modal, Notice, TFile, WorkspaceLeaf, setIcon } from "obsidian";
+import { App, ItemView, Modal, Notice, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 import type ClaudeReaderPlugin from "./main";
 import { EpubBook, parseEpub } from "./epub";
 import {
@@ -13,6 +13,16 @@ import {
 } from "./types";
 import { applyHighlight, highlightFromRange } from "./highlight";
 import { bookKeyFor } from "./storage";
+import { SearchModal } from "./search-modal";
+
+function formatReadingTime(seconds: number): string {
+  const s = Math.floor(seconds);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}min`;
+  const h = Math.floor(m / 60);
+  return `${h}h${m % 60 > 0 ? ` ${m % 60}min` : ""}`;
+}
 
 export const VIEW_TYPE_READER = "claude-reader-view";
 
@@ -84,19 +94,109 @@ export class ReaderView extends ItemView {
     root.addClass("cr-root");
     this.rootEl = root;
 
-    // 如果还没收到 setState (file 还没就位),显示加载占位
     if (!this.file) {
       const placeholder = this.rootEl.createDiv({ cls: "cr-shelf-empty" });
       placeholder.setText("正在加载...");
     } else {
       this.renderShell();
     }
+
+    this.startReadingTimer();
   }
 
   async onClose() {
     for (const u of this.blobUrls) URL.revokeObjectURL(u);
     this.blobUrls = [];
     this.removeToolbar();
+    this.stopReadingTimer(true);
+  }
+
+  // ---------- Reading timer ----------
+  private readingTimerInterval: number | null = null;
+  private lastTickAt = 0;
+  private idleThresholdMs = 60 * 1000; // 60s 没活动就停计时
+  private lastActivityAt = Date.now();
+  private visibilityHandler?: () => void;
+  private activityHandler?: () => void;
+
+  startReadingTimer() {
+    this.stopReadingTimer(false);
+    this.lastTickAt = Date.now();
+    this.lastActivityAt = Date.now();
+
+    this.readingTimerInterval = window.setInterval(() => this.tickReading(), 5000);
+
+    this.visibilityHandler = () => {
+      if (document.hidden) {
+        // 离开页面: 把已经累积的写一次
+        this.flushReadingTime();
+      } else {
+        this.lastTickAt = Date.now();
+        this.lastActivityAt = Date.now();
+      }
+    };
+    document.addEventListener("visibilitychange", this.visibilityHandler);
+
+    this.activityHandler = () => {
+      this.lastActivityAt = Date.now();
+    };
+    // 任何阅读相关交互都算活动
+    document.addEventListener("pointermove", this.activityHandler, {
+      passive: true,
+    });
+    document.addEventListener("pointerdown", this.activityHandler, {
+      passive: true,
+    });
+    document.addEventListener("keydown", this.activityHandler, true);
+    document.addEventListener("scroll", this.activityHandler, true);
+  }
+
+  stopReadingTimer(flush: boolean) {
+    if (this.readingTimerInterval !== null) {
+      window.clearInterval(this.readingTimerInterval);
+      this.readingTimerInterval = null;
+    }
+    if (this.visibilityHandler) {
+      document.removeEventListener("visibilitychange", this.visibilityHandler);
+      this.visibilityHandler = undefined;
+    }
+    if (this.activityHandler) {
+      document.removeEventListener("pointermove", this.activityHandler);
+      document.removeEventListener("pointerdown", this.activityHandler);
+      document.removeEventListener("keydown", this.activityHandler, true);
+      document.removeEventListener("scroll", this.activityHandler, true);
+      this.activityHandler = undefined;
+    }
+    if (flush) void this.flushReadingTime();
+  }
+
+  /**
+   * 每 5 秒一次: 判断"是否在活动",在则累积。
+   * 用 lastTickAt → now 的差(秒)累加,而不是固定 5 秒,这样能正确处理被挂起的情况。
+   */
+  tickReading() {
+    if (!this.data) return;
+    if (document.hidden) return;
+    const now = Date.now();
+    const delta = now - this.lastTickAt;
+    this.lastTickAt = now;
+    const idle = now - this.lastActivityAt;
+    if (idle > this.idleThresholdMs) return;
+    // 计入,但上限 30s 防止跳跃
+    const add = Math.min(delta, 30_000) / 1000;
+    this.data.readingSeconds = (this.data.readingSeconds || 0) + add;
+    // 不每次写硬盘,5 次 tick 才写一次
+    this.tickCounter++;
+    if (this.tickCounter >= 5) {
+      this.tickCounter = 0;
+      void this.flushReadingTime();
+    }
+  }
+  private tickCounter = 0;
+
+  async flushReadingTime() {
+    if (!this.data) return;
+    await this.plugin.storage.save(this.data);
   }
 
   renderShell() {
@@ -130,6 +230,12 @@ export class ReaderView extends ItemView {
     exportBtn.onclick = () => {
       if (this.data) this.plugin.exportBook(this.data, this.file);
     };
+
+    // 搜索按钮
+    const searchBtn = header.createEl("button", { cls: "cr-icon-btn" });
+    setIcon(searchBtn, "search");
+    searchBtn.setAttr("aria-label", "全书搜索");
+    searchBtn.onclick = () => this.openSearchModal();
 
     // body
     const body = this.rootEl.createDiv({ cls: "cr-body" });
@@ -291,6 +397,8 @@ export class ReaderView extends ItemView {
 
     this.updateNavIndicator();
     this.renderToc();
+    // 如果有 pending 搜索关键词,在新章节里高亮第一个匹配
+    requestAnimationFrame(() => this.highlightSearchHitInChapter());
   }
 
   renderHighlights() {
@@ -305,17 +413,19 @@ export class ReaderView extends ItemView {
   }
 
   updateNavIndicator() {
-    if (!this.book) return;
-    this.navIndicatorEl.setText(
-      `${this.chapterIndex + 1} / ${this.book.chapters.length}`
-    );
+    if (!this.book || !this.navIndicatorEl) return;
+    const total = this.book.chapters.length;
+    const cur = this.chapterIndex + 1;
+    const seconds = this.data?.readingSeconds ?? 0;
+    const timeStr = formatReadingTime(seconds);
+    this.navIndicatorEl.setText(`${cur} / ${total} · ${timeStr}`);
     // 切换章节时短暂高亮提示
     this.navIndicatorEl.addClass("show");
     if (this.indicatorTimer) window.clearTimeout(this.indicatorTimer);
     this.indicatorTimer = window.setTimeout(() => {
       this.navIndicatorEl.removeClass("show");
       this.indicatorTimer = null;
-    }, 1600);
+    }, 2000);
   }
 
   indicatorTimer: number | null = null;
@@ -774,6 +884,58 @@ export class ReaderView extends ItemView {
       },
       prompt
     );
+  }
+
+  openSearchModal() {
+    if (!this.book) return;
+    new SearchModal(this.app, this.book, async (chapterIndex, query) => {
+      this.pendingSearchQuery = query;
+      await this.gotoChapter(chapterIndex, 0);
+    }).open();
+  }
+
+  /** gotoChapter 之后若有 pendingSearchQuery,在新章节里找首个匹配并滚到它,临时高亮 */
+  private pendingSearchQuery: string | null = null;
+  private highlightSearchHitInChapter() {
+    if (!this.pendingSearchQuery) return;
+    const q = this.pendingSearchQuery;
+    this.pendingSearchQuery = null;
+    const lower = q.toLowerCase();
+    // 找第一个匹配的文本节点
+    const walker = document.createTreeWalker(
+      this.chapterRootEl,
+      NodeFilter.SHOW_TEXT
+    );
+    let n: Node | null;
+    while ((n = walker.nextNode())) {
+      const t = n as Text;
+      const idx = t.data.toLowerCase().indexOf(lower);
+      if (idx >= 0) {
+        const range = document.createRange();
+        range.setStart(t, idx);
+        range.setEnd(t, idx + q.length);
+        // 用临时 span 标记
+        const span = document.createElement("span");
+        span.className = "cr-search-flash";
+        try {
+          range.surroundContents(span);
+          span.scrollIntoView({ behavior: "smooth", block: "center" });
+          window.setTimeout(() => {
+            // 还原: 把 span 替换回纯文本
+            if (span.parentNode) {
+              const text = document.createTextNode(span.textContent || "");
+              span.parentNode.replaceChild(text, span);
+              this.chapterRootEl.normalize();
+            }
+          }, 2200);
+        } catch {
+          // 跨节点 range 不能 surroundContents — 退而求其次,只 scrollIntoView 父元素
+          const parent = t.parentElement;
+          parent?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+        return;
+      }
+    }
   }
 
   openNoteModal(h: Highlight) {
