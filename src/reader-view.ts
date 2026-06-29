@@ -482,24 +482,18 @@ export class ReaderView extends ItemView {
   }
 
   /**
-   * 兜底入口: 顶栏 AI 按钮触发,直接从当前 selection 抓文字发到 chat。
-   * 即使工具条因为各种原因没出现,这里也能用。
+   * 顶栏 AI 按钮: 有选区 → 带选区发到 chat;无选区 → 打开 chat 面板就行。
    */
   askFromCurrentSelection() {
     const sel = window.getSelection();
-    let text = sel?.toString().trim() || "";
-    if (!text) {
-      // 兼容 iOS: 有时 selection 在 iframe 内但 window.getSelection 拿不到
-      // 退化方案: 弹 prompt 让用户粘贴
-      const pasted = window.prompt(
-        "在书里选中文字后,系统会自动用它。\n如果系统没抓到,请把要问的文字粘到这里:"
-      );
-      if (!pasted) return;
-      text = pasted.trim();
+    const text = sel?.toString().trim() || "";
+    if (text) {
+      new Notice(`正在问 Claude:「${text.slice(0, 40)}...」`);
+      this.askClaudeAbout(text);
+    } else {
+      // 没选区 → 仅打开 chat 面板
+      this.plugin.activateChat();
     }
-    if (!text) return;
-    new Notice(`正在问 Claude:「${text.slice(0, 40)}...」`);
-    this.askClaudeAbout(text);
   }
 
   onSelectionChange() {
