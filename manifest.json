@@ -1,7 +1,7 @@
 {
   "id": "claude-reader",
   "name": "Claude Reader",
-  "version": "0.10.3",
+  "version": "0.11.0",
   "minAppVersion": "1.0.0",
   "description": "EPUB/MOBI/TXT 阅读 + 划词 Claude 对话 + 4 色高亮 · 莫兰迪配色 · 移动端可用",
   "author": "xionglingyu51-sys",

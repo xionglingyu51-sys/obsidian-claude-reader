@@ -14,6 +14,45 @@ export interface StreamHandlers {
   onError: (err: Error) => void;
 }
 
+/**
+ * 粗略 token 估算: 英文按 4 字符/token, 中日韩按 1.5 字符/token。
+ * 不准, 但够拦截"显然太长"的情况。
+ */
+export function estimateTokens(text: string): number {
+  let asciiChars = 0;
+  let cjkChars = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c < 0x80) asciiChars++;
+    else if (c >= 0x3000 && c <= 0x9fff) cjkChars++;
+    else cjkChars++;
+  }
+  return Math.ceil(asciiChars / 4 + cjkChars / 1.5);
+}
+
+/** 把 Anthropic 错误响应转换成用户能看懂的话 */
+export function formatApiError(status: number, body: string): string {
+  let msg = body;
+  try {
+    const json = JSON.parse(body);
+    msg = json?.error?.message || json?.message || body;
+  } catch {
+    // 不是 json
+  }
+  // 常见错误专门翻译
+  if (status === 401 || /authentication|api key|api_key|invalid/i.test(msg))
+    return "API key 无效或没权限,检查设置";
+  if (status === 429 || /rate/i.test(msg))
+    return "请求过快或额度用尽 (rate limit / quota)";
+  if (status === 400 && /context|too long|exceed|max_tokens|tokens/i.test(msg))
+    return "上下文太长,Claude 装不下。试试少引用一两个文件,或清空对话";
+  if (status === 404 || /model/i.test(msg))
+    return `模型名 / base URL 可能写错: ${msg.slice(0, 120)}`;
+  if (status === 0 || /network|fetch|connect/i.test(msg))
+    return "网络问题: 中转站不通或被屏蔽";
+  return `HTTP ${status}: ${msg.slice(0, 200)}`;
+}
+
 export async function streamClaude(
   params: CallParams,
   handlers: StreamHandlers,
@@ -41,8 +80,8 @@ export async function streamClaude(
       signal,
     });
     if (!res.ok || !res.body) {
-      const err = await res.text().catch(() => "");
-      throw new Error(`HTTP ${res.status}: ${err.slice(0, 300)}`);
+      const errText = await res.text().catch(() => "");
+      throw new Error(formatApiError(res.status, errText));
     }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -66,7 +105,9 @@ export async function streamClaude(
           ) {
             handlers.onText(obj.delta.text || "");
           } else if (obj.type === "error") {
-            handlers.onError(new Error(obj.error?.message || "stream error"));
+            handlers.onError(
+              new Error(obj.error?.message || "stream error")
+            );
           }
         } catch {}
       }
@@ -106,7 +147,7 @@ async function callNonStream(p: CallParams): Promise<string> {
     throw: false,
   });
   if (res.status >= 400) {
-    throw new Error(`HTTP ${res.status}: ${res.text.slice(0, 300)}`);
+    throw new Error(formatApiError(res.status, res.text));
   }
   const json = res.json as {
     content?: Array<{ type: string; text?: string }>;

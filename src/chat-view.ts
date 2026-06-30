@@ -7,7 +7,7 @@ import {
   setIcon,
 } from "obsidian";
 import type ClaudeReaderPlugin from "./main";
-import { streamClaude } from "./api";
+import { streamClaude, estimateTokens } from "./api";
 import { FileSuggestModal } from "./file-suggest";
 import { parseBook } from "./book-parser";
 
@@ -484,6 +484,22 @@ export class ChatView extends ItemView {
     if (!this.plugin.settings.apiKey) {
       new Notice("请先在设置里填 API key");
       return;
+    }
+
+    // 预算检查: system + 历史 + 当前消息 大致够不够
+    const sysPreview = this.buildSystemPrompt();
+    const historyChars = this.messages
+      .map((m) => m.content.length)
+      .reduce((a, b) => a + b, 0);
+    const totalTokens = estimateTokens(sysPreview + text) + historyChars / 2;
+    // Claude 单次 200k context, 但中转站经常更小;给 150k 留余量
+    if (totalTokens > 150_000) {
+      const sure = window.confirm(
+        `估算上下文约 ${Math.round(totalTokens / 1000)}k tokens, 超过常规上下文窗口很多, 可能会被中转站/Claude 拒绝。\n\n仍然发送?`
+      );
+      if (!sure) return;
+    } else if (totalTokens > 80_000) {
+      new Notice(`上下文约 ${Math.round(totalTokens / 1000)}k tokens, 较大但应该可以`);
     }
 
     // 记住这条消息的源选区,以便 AI 回答存为想法时知道贴回哪里
