@@ -506,18 +506,33 @@ export class ReaderView extends ItemView {
 
   onSelectionChange() {
     const sel = window.getSelection();
-    // 工具条已经存在时,不因为选区变化而关闭——靠 outside click 关闭
-    if (this.toolbarEl) return;
-    if (!sel || sel.isCollapsed) return;
-    if (sel.rangeCount === 0) return;
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+      // 选区消失: 工具条继续存在(允许用户点击),不做处理
+      return;
+    }
     const range = sel.getRangeAt(0);
     if (!this.chapterRootEl.contains(range.commonAncestorContainer)) return;
     const text = sel.toString().trim();
     if (!text) return;
     const rect = range.getBoundingClientRect();
     if (rect.width === 0 && rect.height === 0) return;
+
+    // 工具条已经存在: 只更新绑定的选区文字/range,不重建工具条
+    if (this.toolbarEl) {
+      this.updateToolbarSelection(range);
+      return;
+    }
     this.showToolbar(rect, range);
   }
+
+  /** 更新当前工具条上按钮绑定的选区(iOS 长按拖动扩大选择的场景) */
+  updateToolbarSelection(range: Range) {
+    this.currentSelectedText = range.toString();
+    this.currentSelectedRange = range.cloneRange();
+  }
+
+  currentSelectedText = "";
+  currentSelectedRange: Range | null = null;
 
   removeToolbar() {
     if (this.toolbarEl) {
@@ -536,9 +551,10 @@ export class ReaderView extends ItemView {
 
   showToolbar(rect: DOMRect, range: Range) {
     this.removeToolbar();
-    // 提前快照选中文字,防止 iOS 上 range 被吃掉
-    const selectedText = range.toString();
-    const savedRange = range.cloneRange();
+    // 快照选中文字 + range。iOS 长按扩大选区时,onSelectionChange 会调
+    // updateToolbarSelection 把这两个变量更新到最新值,按钮点击时读的是最新的。
+    this.currentSelectedText = range.toString();
+    this.currentSelectedRange = range.cloneRange();
 
     const tb = document.body.createDiv({ cls: "cr-toolbar" });
 
@@ -582,7 +598,8 @@ export class ReaderView extends ItemView {
       });
       dot.style.background = COLORS[c].fill;
       onPress(dot, () => {
-        this.addHighlight(savedRange.cloneRange(), c);
+        const r = this.currentSelectedRange;
+        if (r) this.addHighlight(r.cloneRange(), c);
         window.getSelection()?.removeAllRanges();
         this.removeToolbar();
       });
@@ -593,11 +610,12 @@ export class ReaderView extends ItemView {
     noteBtn.setText("📝");
     noteBtn.setAttr("aria-label", "划线并写笔记");
     onPress(noteBtn, async () => {
-      const h = await this.addHighlight(
-        savedRange.cloneRange(),
-        "yellow",
-        true
-      );
+      const r = this.currentSelectedRange;
+      if (!r) {
+        this.removeToolbar();
+        return;
+      }
+      const h = await this.addHighlight(r.cloneRange(), "yellow", true);
       window.getSelection()?.removeAllRanges();
       this.removeToolbar();
       if (h) this.openNoteModal(h);
@@ -608,7 +626,7 @@ export class ReaderView extends ItemView {
     ai.setText("AI");
     ai.setAttr("aria-label", "问 Claude");
     onPress(ai, () => {
-      this.askClaudeAbout(selectedText);
+      this.askClaudeAbout(this.currentSelectedText);
       window.getSelection()?.removeAllRanges();
       this.removeToolbar();
     });
@@ -619,7 +637,7 @@ export class ReaderView extends ItemView {
       btn.setText(tpl.label);
       btn.setAttr("aria-label", tpl.prompt);
       onPress(btn, () => {
-        this.askClaudeWithTemplate(selectedText, tpl.prompt);
+        this.askClaudeWithTemplate(this.currentSelectedText, tpl.prompt);
         window.getSelection()?.removeAllRanges();
         this.removeToolbar();
       });
@@ -630,7 +648,7 @@ export class ReaderView extends ItemView {
     setIcon(copy, "copy");
     copy.setAttr("aria-label", "复制");
     onPress(copy, () => {
-      this.copyToClipboard(selectedText);
+      this.copyToClipboard(this.currentSelectedText);
       window.getSelection()?.removeAllRanges();
       this.removeToolbar();
     });
